@@ -1,0 +1,12 @@
+{
+    "id": "windows_agent",
+    "name": "Windows KAAL Agent",
+    "version": "1.0.0",
+    "type": "module",
+    "module_type": "agent",
+    "platforms": [
+        "windows"
+    ],
+    "entry": "main.py",
+    "class": "WindowsKAAL"
+}

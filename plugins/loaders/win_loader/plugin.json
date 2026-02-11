@@ -1,0 +1,11 @@
+{
+    "id": "win_loader",
+    "name": "Windows KAAL Loader",
+    "version": "1.0.0",
+    "type": "loader",
+    "platforms": [
+        "windows"
+    ],
+    "entry": "main.py",
+    "class": "WindowsLoader"
+}

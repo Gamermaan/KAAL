@@ -1,0 +1,21 @@
+# KAAL Framework Configuration
+console:
+  host: "localhost"
+  port: 8080
+  relays:
+    telegram_token: ""   # Set your Telegram bot token
+    telegram_chat: ""    # Set your Telegram chat ID
+    discord_token: ""    # Set your Discord bot token
+    discord_channel: 0   # Set your Discord channel ID
+    github_token: ""     # Set your GitHub personal access token
+    gist_id: ""          # Set your Gist ID
+
+ai:
+  deepseek_key: ""       # Optional: DeepSeek API key
+  ollama: false          # Set true to enable local Ollama
+  use_deepseek: false    # Enable DeepSeek for code transformation
+  use_ollama: false      # Enable Ollama for code transformation
+  opt_out_training: true # Remember to opt out of training if using DeepSeek
+
+build:
+  output_dir: "./build"  # Directory where compiled agents are stored
