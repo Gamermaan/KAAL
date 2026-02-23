@@ -1,0 +1,10 @@
+﻿9f58f9c HEAD@{0}: checkout: moving from main to v4.0-c2-structured-output
+75f8c35 HEAD@{1}: checkout: moving from v4.0-c2-structured-output to main
+9f58f9c HEAD@{2}: reset: moving to origin/v4.0-c2-structured-output
+9f58f9c HEAD@{3}: commit (amend): v4.0: Discord C2 API Rate Limit bug fix and JSON Output Stringification Fix
+54e08c8 HEAD@{4}: commit: v4.0: Discord C2 API Rate Limit bug fix and JSON Output Stringification Fix
+61aed87 HEAD@{5}: checkout: moving from dev to v4.0-c2-structured-output
+61aed87 HEAD@{6}: commit (amend): Initial Commit
+df9e404 HEAD@{7}: commit (amend): Initial Commit
+75f8c35 HEAD@{8}: checkout: moving from main to dev
+75f8c35 HEAD@{9}: commit (initial): Initial Commit

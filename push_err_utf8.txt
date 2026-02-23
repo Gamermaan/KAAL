@@ -1,0 +1,112 @@
+﻿git : remote: error: 
+GH013: Repository rule 
+violations found for 
+refs/heads/v4.1-stable.   
+     
+At line:1 char:1
++ git push -f -u origin 
+v4.1-stable 2>&1 | 
+Out-File push_err.txt; 
+type  ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~
+~~~~~~~~~~~~~~
+    + CategoryInfo        
+      : NotSpecified: (r  
+  emote: error: ...stab   
+ le.        :String) [    
+], RemoteException
+    + FullyQualifiedError 
+   Id : NativeCommandErr  
+  or
+ 
+remote: 
+remote: - GITHUB PUSH 
+PROTECTION        
+remote:   ΓÇöΓÇöΓÇöΓÇöΓÇöΓ
+ÇöΓÇöΓÇöΓÇöΓÇöΓÇöΓÇöΓÇöΓÇö
+ΓÇöΓÇöΓÇöΓÇöΓÇöΓÇöΓÇöΓÇöΓÇ
+öΓÇöΓÇöΓÇöΓÇöΓÇöΓÇöΓÇöΓÇöΓ
+ÇöΓÇöΓÇöΓÇöΓÇöΓÇöΓÇöΓÇöΓÇö
+ΓÇö        
+remote:     Resolve the 
+following violations 
+before pushing again      
+  
+remote: 
+remote:     - Push cannot 
+contain secrets        
+remote: 
+remote:             
+remote:      (?) Learn 
+how to resolve a blocked 
+push        
+remote:      https://docs.
+github.com/code-security/s
+ecret-scanning/working-wit
+h-secret-scanning-and-push
+-protection/working-with-p
+ush-protection-from-the-co
+mmand-line#resolving-a-blo
+cked-push        
+remote:             
+remote:             
+remote:       ΓÇöΓÇö 
+GitHub Personal Access 
+Token ΓÇöΓÇöΓÇöΓÇöΓÇöΓÇöΓÇ
+öΓÇöΓÇöΓÇöΓÇöΓÇöΓÇöΓÇöΓÇöΓ
+ÇöΓÇöΓÇöΓÇöΓÇöΓÇöΓÇö      
+  
+remote:        locations: 
+       
+remote:          - 
+commit: b963fef7a24b9ece0c
+fb4d924f148d2007be644b    
+    
+remote:            path: 
+DEBUG_STATE_DUMP.md:817   
+     
+remote:          - 
+commit: b963fef7a24b9ece0c
+fb4d924f148d2007be644b    
+    
+remote:            path: 
+add_github_relay.py:4     
+   
+remote:          - 
+commit: b963fef7a24b9ece0c
+fb4d924f148d2007be644b    
+    
+remote:            path: 
+standalone_agent.py:46    
+    
+remote:          - 
+commit: b963fef7a24b9ece0c
+fb4d924f148d2007be644b    
+    
+remote:            path: 
+tokens.txt:15        
+remote:             
+remote:        (?) To 
+push, remove secret from 
+commit(s) or follow this 
+URL to allow the secret.  
+      
+remote:        https://git
+hub.com/Gamermaan/KAAL/sec
+urity/secret-scanning/unbl
+ock-secret/3A5kPskjENzuMzd
+bid4xARCIrCd        
+remote:             
+remote: 
+remote: 
+To https://github.com/Game
+rmaan/KAAL.git
+ ! [remote rejected] 
+v4.1-stable -> 
+v4.1-stable (push 
+declined due to 
+repository rule 
+violations)
+error: failed to push 
+some refs to 'https://gith
+ub.com/Gamermaan/KAAL.git'

@@ -1,0 +1,135 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: dark;
+  --holo-blue: #00f3ff;
+  --holo-blue-dim: rgba(0, 243, 255, 0.1);
+  --holo-red: #ff003c;
+  --holo-red-dim: rgba(255, 0, 60, 0.1);
+  --holo-green: #0aff00;
+  --bg-dark: #020205;
+  --bg-panel: rgba(10, 15, 20, 0.7);
+  --grid-color: rgba(0, 243, 255, 0.05);
+}
+
+body {
+  margin: 0;
+  background-color: var(--bg-dark);
+  color: var(--holo-blue);
+  font-family: 'Rajdhani', 'Segoe UI', sans-serif;
+  overflow: hidden;
+  background-image:
+    linear-gradient(var(--grid-color) 1px, transparent 1px),
+    linear-gradient(90deg, var(--grid-color) 1px, transparent 1px);
+  background-size: 40px 40px;
+  background-position: center center;
+}
+
+#root {
+  width: 100vw;
+  height: 100vh;
+  overflow: hidden;
+}
+
+/* --- VORTEX FUI Utilities --- */
+
+.text-holo {
+  color: var(--holo-blue);
+  text-shadow: 0 0 5px var(--holo-blue-dim), 0 0 10px var(--holo-blue-dim);
+}
+
+.text-holo-red {
+  color: var(--holo-red);
+  text-shadow: 0 0 5px var(--holo-red-dim), 0 0 10px var(--holo-red-dim);
+}
+
+.fui-clip-tr {
+  clip-path: polygon(0 0,
+      calc(100% - 20px) 0,
+      100% 20px,
+      100% 100%,
+      0 100%);
+}
+
+.fui-clip-corners {
+  clip-path: polygon(20px 0,
+      calc(100% - 20px) 0,
+      100% 20px,
+      100% calc(100% - 20px),
+      calc(100% - 20px) 100%,
+      20px 100%,
+      0 calc(100% - 20px),
+      0 20px);
+}
+
+/* 3. Scanline Animation (Lowered Z-Index) */
+@keyframes scanline {
+  0% {
+    transform: translateY(-100%);
+  }
+
+  100% {
+    transform: translateY(100vh);
+  }
+}
+
+.scanline-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  pointer-events: none;
+  background: linear-gradient(to bottom, transparent 50%, rgba(0, 243, 255, 0.02) 50%);
+  background-size: 100% 4px;
+  z-index: 10;
+  opacity: 0.1;
+}
+
+.scan_beam {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 100vh;
+  background: linear-gradient(to bottom, transparent, rgba(0, 243, 255, 0.1), transparent);
+  animation: scanline 8s linear infinite;
+  z-index: 11;
+  pointer-events: none;
+}
+
+.fui-panel {
+  background: var(--bg-panel);
+  backdrop-filter: blur(8px);
+  border: 1px solid rgba(0, 243, 255, 0.2);
+  box-shadow: 0 0 15px rgba(0, 243, 255, 0.05);
+}
+
+::-webkit-scrollbar {
+  width: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: #050510;
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(0, 243, 255, 0.3);
+  border-radius: 2px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--holo-blue);
+}
+
+@import url('https://fonts.googleapis.com/css2?family=Rajdhani:wght@400;600;700&family=Share+Tech+Mono&display=swap');
+
+.font-tech {
+  font-family: 'Share Tech Mono', monospace;
+}
+
+.font-header {
+  font-family: 'Rajdhani', sans-serif;
+}

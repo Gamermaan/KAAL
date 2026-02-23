@@ -1,0 +1,19 @@
+{
+    "poll_sec": 5,
+    "heartbeat_sec": 30,
+    "relay_type": "discord",
+    "relay_config": {
+        "discord": {
+            "token": "YOUR_DISCORD_BOT_TOKEN_HERE",
+            "channel_id": "1471272917403697248"
+        },
+        "telegram": {
+            "token": "",
+            "chat_id": ""
+        },
+        "github": {
+            "token": "",
+            "gist_id": ""
+        }
+    }
+}

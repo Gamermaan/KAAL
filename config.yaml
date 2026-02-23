@@ -1,0 +1,13 @@
+ai:
+  enabled: false
+  provider: ollama
+log_level: INFO
+proxy:
+  discord:
+    webhook: https://discord.com/api/webhooks/1472312679849787392/cTlpD-b1q192txmSySyPZphVREs7l_FQawNyxVLHHOeZKjJXTPysam6QkXx4vfVLQOxy
+  telegram:
+    token: 8324811543:AAER4k0GhQQA4JODA0CZqZI8YqTDbauNABM
+server:
+  host: 0.0.0.0
+  port: 5000
+version: 4.0.0
