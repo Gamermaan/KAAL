@@ -23,9 +23,17 @@ const AgentList = () => {
         const fetchAgents = async () => {
             try {
                 const response = await getAgents();
-                setAgents(response.data);
+                if (Array.isArray(response.data)) {
+                    setAgents(response.data);
+                } else if (response.data && Array.isArray(response.data.agents)) {
+                    setAgents(response.data.agents);
+                } else {
+                    console.error('Unexpected agents response:', response.data);
+                    setAgents([]);
+                }
             } catch (error) {
                 console.error('Failed to fetch agents:', error);
+                setAgents([]);
             }
         };
         fetchAgents();

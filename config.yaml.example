@@ -1,0 +1,23 @@
+# KAAL Framework Configuration Template
+# Copy this file to config.yaml and fill in your values.
+# NEVER commit config.yaml — it's in .gitignore.
+
+ai:
+  enabled: false
+  provider: ollama
+log_level: INFO
+proxy:
+  discord:
+    webhook: "https://discord.com/api/webhooks/YOUR_WEBHOOK_ID/YOUR_WEBHOOK_TOKEN"
+    bot_token: "YOUR_DISCORD_BOT_TOKEN"
+    channel_id: "YOUR_DISCORD_CHANNEL_ID"
+    guild_id: "YOUR_DISCORD_GUILD_ID"
+    per_agent_channels: true
+  telegram:
+    token: "YOUR_TELEGRAM_BOT_TOKEN"
+server:
+  host: 0.0.0.0
+  port: 5000
+  api_key: ""       # Set a key to require Bearer auth on all API endpoints (empty = disabled)
+  encryption_key: "" # Set a secret to enable AES-256-GCM payload encryption (empty = disabled)
+version: 4.0.0

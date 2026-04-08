@@ -1,0 +1,35 @@
+
+> frontend@0.0.0 build
+> vite build
+
+[36mvite v7.3.1 [32mbuilding client environment for production...[36m[39m
+transforming...
+[33m[vite:css][postcss] @import must precede all other statements (besides @charset or empty @layer)
+125 |  }
+126 |  
+127 |  @import url('https://fonts.googleapis.com/css2?family=Rajdhani:wght@400;600;700&family=Share+Tech+Mono&display=swap');
+    |  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+128 |  
+129 |  .font-tech {[39m
+[32m✓[39m 2193 modules transformed.
+[31m✗[39m Build failed in 3.12s
+[31merror during build:
+[31m../../../../../../../../../../C:/Users/Gurpartap/OneDrive/Desktop/hacking tools/malware/Kaal/web/frontend/src/components/modules/FileManager.jsx (7:46): "deleteFile" is not exported by "../../../../../../../../../../C:/Users/Gurpartap/OneDrive/Desktop/hacking tools/malware/Kaal/web/frontend/src/services/api.js", imported by "../../../../../../../../../../C:/Users/Gurpartap/OneDrive/Desktop/hacking tools/malware/Kaal/web/frontend/src/components/modules/FileManager.jsx".[31m
+file: [36mC:/Users/Gurpartap/OneDrive/Desktop/hacking tools/malware/Kaal/web/frontend/src/components/modules/FileManager.jsx:7:46[31m
+[33m
+5:     ChevronRight, ChevronDown, Monitor, Share2, Info
+6: } from 'lucide-react';
+7: import { listFiles, downloadFile, uploadFile, deleteFile, createFolder, renameFile } from '../../services/api';
+                                                 ^
+8: import { kaalEvents } from '../../services/eventBus';
+[31m
+    at getRollupError (file:///c:/Users/Gurpartap/OneDrive/Desktop/hacking%20tools/malware/Kaal/web/frontend/node_modules/rollup/dist/es/shared/parseAst.js:402:41)
+    at error (file:///c:/Users/Gurpartap/OneDrive/Desktop/hacking%20tools/malware/Kaal/web/frontend/node_modules/rollup/dist/es/shared/parseAst.js:398:42)
+    at Module.error (file:///c:/Users/Gurpartap/OneDrive/Desktop/hacking%20tools/malware/Kaal/web/frontend/node_modules/rollup/dist/es/shared/node-entry.js:17040:16)
+    at Module.traceVariable (file:///c:/Users/Gurpartap/OneDrive/Desktop/hacking%20tools/malware/Kaal/web/frontend/node_modules/rollup/dist/es/shared/node-entry.js:17452:29)
+    at ModuleScope.findVariable (file:///c:/Users/Gurpartap/OneDrive/Desktop/hacking%20tools/malware/Kaal/web/frontend/node_modules/rollup/dist/es/shared/node-entry.js:15070:39)
+    at ReturnValueScope.findVariable (file:///c:/Users/Gurpartap/OneDrive/Desktop/hacking%20tools/malware/Kaal/web/frontend/node_modules/rollup/dist/es/shared/node-entry.js:5673:38)
+    at FunctionBodyScope.findVariable (file:///c:/Users/Gurpartap/OneDrive/Desktop/hacking%20tools/malware/Kaal/web/frontend/node_modules/rollup/dist/es/shared/node-entry.js:5673:38)
+    at ReturnValueScope.findVariable (file:///c:/Users/Gurpartap/OneDrive/Desktop/hacking%20tools/malware/Kaal/web/frontend/node_modules/rollup/dist/es/shared/node-entry.js:5673:38)
+    at FunctionBodyScope.findVariable (file:///c:/Users/Gurpartap/OneDrive/Desktop/hacking%20tools/malware/Kaal/web/frontend/node_modules/rollup/dist/es/shared/node-entry.js:5673:38)
+    at BlockScope.findVariable (file:///c:/Users/Gurpartap/OneDrive/Desktop/hacking%20tools/malware/Kaal/web/frontend/node_modules/rollup/dist/es/shared/node-entry.js:5673:38)[39m

@@ -98,5 +98,34 @@ class DiscordClient:
     
     async def delete_message(self, channel_id: str, message_id: str) -> bool:
         """Delete a message."""
-        result = await self._request("DELETE", f"/channels/{channel_id}/messages/{message_id}")
+        await self._request("DELETE", f"/channels/{channel_id}/messages/{message_id}")
+        return True
+        
+    async def create_webhook(self, channel_id: str, name: str) -> Optional[Dict[str, Any]]:
+        """Create a webhook in a specific channel to bypass global bot rate limits."""
+        payload = {"name": name}
+        return await self._request("POST", f"/channels/{channel_id}/webhooks", json=payload)
+
+    async def get_channel(self, channel_id: str) -> Optional[Dict[str, Any]]:
+        """Get a channel by ID. Returns None if the channel doesn't exist (404)."""
+        return await self._request("GET", f"/channels/{channel_id}")
+
+    async def create_text_channel(self, guild_id: str, name: str, category_id: Optional[str] = None) -> Optional[Dict]:
+        """Create a new text channel in the specified guild."""
+        payload = {
+            "name": name,
+            "type": 0,  # GUILD_TEXT
+            "permission_overwrites": []  
+        }
+        if category_id:
+            payload["parent_id"] = category_id
+        return await self._request("POST", f"/guilds/{guild_id}/channels", json=payload)
+
+    async def delete_channel(self, channel_id: str) -> bool:
+        """Delete a channel."""
+        result = await self._request("DELETE", f"/channels/{channel_id}")
         return result is not None
+
+    async def get_guild_channels(self, guild_id: str) -> list:
+        """List all channels in a guild."""
+        return await self._request("GET", f"/guilds/{guild_id}/channels")

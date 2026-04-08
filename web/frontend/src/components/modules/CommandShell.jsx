@@ -1,4 +1,4 @@
-import React, { useEffect, useRef } from 'react';
+import React, { useEffect, useRef, useCallback, useState } from 'react';
 import { Terminal } from 'xterm';
 import { FitAddon } from 'xterm-addon-fit';
 import 'xterm/css/xterm.css';
@@ -6,20 +6,36 @@ import { sendCommand } from '../../services/api';
 import { Terminal as TerminalIcon, Maximize2, Trash2 } from 'lucide-react';
 import { kaalEvents } from '../../services/eventBus';
 
+/**
+ * CommandShell – Persistent terminal that survives tab switches.
+ *
+ * Key change: useEffect dependency is [agentId] ONLY.
+ * The `isInteractive` flag is tracked via a ref so we don't
+ * recreate the terminal when toggling interactive mode.
+ */
 const CommandShell = ({ agentId }) => {
     const terminalRef = useRef(null);
     const term = useRef(null);
     const fitAddon = useRef(null);
     const commandBuffer = useRef('');
+    const currentPath = useRef('~');
+    const isInteractiveRef = useRef(false);
 
-    const [isInteractive, setIsInteractive] = React.useState(false);
+    // State for UI toggle button only — does NOT cause terminal recreation
+    const [isInteractive, setIsInteractive] = useState(false);
+
+    // Keep the ref in sync with state (for use inside callbacks)
+    useEffect(() => {
+        isInteractiveRef.current = isInteractive;
+    }, [isInteractive]);
 
     useEffect(() => {
-        // ... (Terminal Init) ...
-        // Init Terminal
+        if (!terminalRef.current) return;
+
+        // Init Terminal ONCE
         term.current = new Terminal({
             theme: {
-                background: '#0f0f23', // Matches bg-primary
+                background: '#0f0f23',
                 foreground: '#cdd6f4',
                 cursor: '#00ff9f',
                 selection: 'rgba(0, 255, 159, 0.3)',
@@ -38,6 +54,7 @@ const CommandShell = ({ agentId }) => {
             cursorStyle: 'underline',
             lineHeight: 1.2,
             allowTransparency: true,
+            scrollback: 5000,
         });
 
         fitAddon.current = new FitAddon();
@@ -54,7 +71,7 @@ const CommandShell = ({ agentId }) => {
         term.current.writeln('\x1b[1;32m[+] SECURE CONNECTION ESTABLISHED\x1b[0m');
         term.current.writeln(`\x1b[1;30mTarget ID: ${agentId}\x1b[0m`);
         term.current.writeln('');
-        term.current.write('\x1b[1;32mroot@kaal\x1b[0m:\x1b[1;34m~\x1b[0m$ ');
+        term.current.write(`\x1b[1;32mroot@kaal\x1b[0m:\x1b[1;34m${currentPath.current}\x1b[0m$ `);
 
         // Key Handler
         term.current.onKey(async (e) => {
@@ -69,22 +86,19 @@ const CommandShell = ({ agentId }) => {
                     if (cmdToSend === 'clear') {
                         term.current.clear();
                         commandBuffer.current = '';
-                    } else if (isInteractive) {
-                        // Interactive Mode: Send input directly
+                    } else if (isInteractiveRef.current) {
                         await sendCommand(agentId, `shell_input ${cmdToSend}`);
-                        // No local echo of result, wait for shell_output
                     } else {
-                        // Normal Mode
                         await executeCommand(cmdToSend);
                     }
-                } else if (isInteractive) {
-                    // Empty enter in interactive mode usually sends newline
+                } else if (isInteractiveRef.current) {
                     await sendCommand(agentId, `shell_input  `);
                 }
 
                 commandBuffer.current = '';
-                if (!isInteractive) {
-                    term.current.write('\x1b[1;32mroot@kaal\x1b[0m:\x1b[1;34m~\x1b[0m$ ');
+                const isCd = cmdToSend.startsWith('cd ');
+                if (!isInteractiveRef.current && !isCd) {
+                    term.current.write(`\x1b[1;32mroot@kaal\x1b[0m:\x1b[1;34m${currentPath.current}\x1b[0m$ `);
                 }
             } else if (code === 8) { // Backspace
                 if (commandBuffer.current.length > 0) {
@@ -93,109 +107,152 @@ const CommandShell = ({ agentId }) => {
                 }
             } else if (code >= 32 && code <= 126) {
                 commandBuffer.current += char;
-                if (!isInteractive) term.current.write(char);
-                else {
-                    // In interactive mode, local echo? 
-                    // Usually shells echo back. Double echo if we write here + shell output.
-                    // Let's assume shell echoes back for now, but user experience might be laggy.
-                    // Better to echo locally for responsiveness.
-                    term.current.write(char);
-                }
+                term.current.write(char);
             }
         });
 
-        const handleResize = () => fitAddon.current.fit();
+        const handleResize = () => {
+            if (fitAddon.current) fitAddon.current.fit();
+        };
         window.addEventListener('resize', handleResize);
 
         // Listen for task results
         const unsubscribeResult = kaalEvents.on('task_result', (data) => {
             if (data.agent_id !== agentId) return;
-            if (isInteractive) return; // Ignore standard results in interactive mode? Or log them?
+            if (isInteractiveRef.current) return;
 
             let output = "";
-            let cwd = null;
 
             try {
                 const parsed = typeof data.result === 'string' ? JSON.parse(data.result) : data.result;
 
                 if (parsed.type === "text" || parsed.type === "error") {
-                    output = parsed.data || "";
+                    output = parsed.data.text || parsed.data || "";
+                    if (typeof output === 'string') {
+                        if (output.includes('~~KAAL_CWD~~')) {
+                            output = output.replace(/~~KAAL_CWD~~[^\r\n]*~~END~~[\r\n]*/g, '');
+                            const raw = parsed.data.text || '';
+                            const match = raw.match(/~~KAAL_CWD~~(.+?)~~END~~/);
+                            if (match) {
+                                currentPath.current = match[1].trim();
+                                if (term.current) {
+                                    term.current.write(`\r\n\x1b[1;32mroot@kaal\x1b[0m:\x1b[1;34m${currentPath.current}\x1b[0m$ `);
+                                }
+                            }
+                        }
+                        if (output.startsWith('Changed to ')) {
+                            currentPath.current = output.substring(11).trim();
+                            if (term.current) {
+                                term.current.write(`\r\n\x1b[1;32mroot@kaal\x1b[0m:\x1b[1;34m${currentPath.current}\x1b[0m$ `);
+                            }
+                        }
+                    }
                 } else if (parsed.type === "file_list") {
-                    cwd = parsed.path;
-                    output = `Directory: ${parsed.path}\r\n`;
-                    if (parsed.files) {
-                        parsed.files.forEach(f => {
-                            const size = f.is_dir ? "<DIR>" : f.size.toString().padStart(10);
-                            const name = f.is_dir ? `\x1b[1;34m${f.name}\x1b[0m` : f.name;
-                            output += `${size}  ${name}\r\n`;
-                        });
+                    if (parsed.data && parsed.data.path) {
+                        currentPath.current = parsed.data.path;
+                        output = `Directory: ${parsed.data.path}\r\n`;
+                        if (parsed.data.files) {
+                            parsed.data.files.forEach(f => {
+                                const size = f.is_dir ? "<DIR>" : f.size.toString().padStart(10);
+                                const name = f.is_dir ? `\x1b[1;34m${f.name}\x1b[0m` : f.name;
+                                output += `${size}  ${name}\r\n`;
+                            });
+                        }
+                        if (term.current) {
+                            term.current.write(`\r\n\x1b[1;32mroot@kaal\x1b[0m:\x1b[1;34m${currentPath.current}\x1b[0m$ `);
+                        }
+                    } else if (parsed.path) {
+                        currentPath.current = parsed.path;
+                        output = `Directory: ${parsed.path}\r\n`;
+                        if (parsed.files) {
+                            parsed.files.forEach(f => {
+                                const size = f.is_dir ? "<DIR>" : f.size.toString().padStart(10);
+                                const name = f.is_dir ? `\x1b[1;34m${f.name}\x1b[0m` : f.name;
+                                output += `${size}  ${name}\r\n`;
+                            });
+                        }
+                        if (term.current) {
+                            term.current.write(`\r\n\x1b[1;32mroot@kaal\x1b[0m:\x1b[1;34m${currentPath.current}\x1b[0m$ `);
+                        }
                     }
                 } else if (parsed.type === "process_list") {
-                    if (parsed.processes) {
+                    const procs = parsed.data && parsed.data.processes ? parsed.data.processes : parsed.processes;
+                    if (procs) {
                         output = "PID     MEM      NAME\r\n";
                         output += "-----   -----    ----\r\n";
-                        parsed.processes.forEach(p => {
+                        procs.forEach(p => {
                             output += `${p.pid.padEnd(8)} ${p.memory.padEnd(8)} ${p.name}\r\n`;
                         });
                     }
-                } else if (parsed.type === "screenshot" || parsed.type === "webcam") {
-                    output = `[Capture Received: ${parsed.type}] (See CAM/Files module)\r\n`;
+                } else if (parsed.type === "screenshot" || parsed.type === "screen" || parsed.type === "webcam") {
+                    output = `\x1b[1;32m[✓ Capture Received: ${parsed.type}]\x1b[0m (See CAM/Files module)\r\n`;
                 } else {
                     output = JSON.stringify(parsed, null, 2).replace(/\n/g, '\r\n');
                 }
             } catch (e) {
                 console.error("Shell JSON Parse Error!", e.message);
-                console.error("Raw data string:", data.result);
                 output = typeof data.result === 'string' ? data.result : JSON.stringify(data.result);
             }
 
-            if (output.startsWith("[SHELL]")) output = output.substring(8);
+            if (typeof output === 'string' && output.startsWith("[SHELL]")) output = output.substring(8);
 
-            term.current.writeln(output.replace(/\n/g, '\r\n'));
-            const prompt = cwd ? `\x1b[1;32mroot@kaal\x1b[0m:\x1b[1;34m${cwd}\x1b[0m$ ` : '\r\n\x1b[1;32mroot@kaal\x1b[0m:\x1b[1;34m~\x1b[0m$ ';
-            term.current.write(prompt);
+            if (typeof output === 'string' && term.current) {
+                term.current.writeln(output.replace(/\n/g, '\r\n'));
+            }
+            const prompt = `\r\n\x1b[1;32mroot@kaal\x1b[0m:\x1b[1;34m${currentPath.current}\x1b[0m$ `;
+            if (term.current) term.current.write(prompt);
         });
 
-        // Listen for Shell Output (Phase 8)
+        // Listen for Shell Output (Interactive mode)
         const unsubscribeShell = kaalEvents.on('shell_output', (data) => {
             if (data.agent_id !== agentId) return;
-            if (!isInteractive) return; // Ignore if not in mode?
-
-            // Write raw output from shell
-            // Replace newlines just in case
+            if (!isInteractiveRef.current) return;
             const out = data.output.replace(/\n/g, '\r\n');
-            term.current.write(out);
+            if (term.current) term.current.write(out);
         });
 
         return () => {
-            term.current.dispose();
+            if (term.current) term.current.dispose();
             window.removeEventListener('resize', handleResize);
             unsubscribeResult();
             unsubscribeShell();
         };
-    }, [agentId, isInteractive]); // Re-run if mode changes
+    }, [agentId]); // ← ONLY re-init when agent changes, NOT on interactive toggle
 
     const toggleInteractive = async () => {
-        if (!isInteractive) {
-            term.current.writeln('\x1b[1;33m[*] Starting Interactive Shell Session...\x1b[0m');
+        if (!isInteractiveRef.current) {
+            if (term.current) term.current.writeln('\x1b[1;33m[*] Starting Interactive Shell Session...\x1b[0m');
             await sendCommand(agentId, 'shell_start');
             setIsInteractive(true);
         } else {
-            term.current.writeln('\x1b[1;33m[*] Stopping Interactive Shell Session...\x1b[0m');
+            if (term.current) term.current.writeln('\x1b[1;33m[*] Stopping Interactive Shell Session...\x1b[0m');
             await sendCommand(agentId, 'shell_stop');
             setIsInteractive(false);
-            term.current.write('\r\n\x1b[1;32mroot@kaal\x1b[0m:\x1b[1;34m~\x1b[0m$ ');
+            if (term.current) term.current.write(`\r\n\x1b[1;32mroot@kaal\x1b[0m:\x1b[1;34m${currentPath.current}\x1b[0m$ `);
+        }
+    };
+
+    const clearQueue = async () => {
+        try {
+            const resp = await fetch(`/api/agent/${agentId}/clear_queue`, { method: 'POST' });
+            const data = await resp.json();
+            if (term.current) {
+                term.current.writeln(`\r\n\x1b[1;33m[*] Cleared ${data.cleared || 0} queued task(s)\x1b[0m`);
+                term.current.write(`\x1b[1;32mroot@kaal\x1b[0m:\x1b[1;34m${currentPath.current}\x1b[0m$ `);
+            }
+        } catch (e) {
+            if (term.current) term.current.writeln(`\r\n\x1b[31m[ERROR] Failed to clear queue: ${e.message}\x1b[0m`);
         }
     };
 
     const executeCommand = async (cmd) => {
         try {
             const result = await sendCommand(agentId, `exec ${cmd}`);
-            if (result.data && result.data.task) {
+            if (result.data && result.data.task && term.current) {
                 term.current.writeln(`\x1b[90m[Task Queued: ${result.data.task}]\x1b[0m`);
             }
         } catch (error) {
-            term.current.writeln(`\x1b[31m[ERROR] ${error.message}\x1b[0m`);
+            if (term.current) term.current.writeln(`\x1b[31m[ERROR] ${error.message}\x1b[0m`);
         }
     };
 
@@ -218,8 +275,14 @@ const CommandShell = ({ agentId }) => {
                         {isInteractive ? 'LIVE SHELL' : 'INTERACTIVE'}
                     </button>
                     <button
-                        onClick={() => term.current.clear()}
-                        className="p-1 hover:text-white text-gray-500 transition-colors" title="Clear">
+                        onClick={clearQueue}
+                        className="px-2 py-0.5 text-xs font-mono rounded border border-red-500/50 text-red-400 bg-red-500/10 hover:bg-red-500/20 transition-colors"
+                        title="Clear Pending Commands">
+                        CLEAR Q
+                    </button>
+                    <button
+                        onClick={() => term.current && term.current.clear()}
+                        className="p-1 hover:text-white text-gray-500 transition-colors" title="Clear Screen">
                         <Trash2 className="w-4 h-4" />
                     </button>
                     <button className="p-1 hover:text-white text-gray-500 transition-colors" title="Maximize">
@@ -230,9 +293,7 @@ const CommandShell = ({ agentId }) => {
 
             {/* Terminal Container */}
             <div className="flex-1 relative group">
-                {/* Glow Effect on Focus (Simulated) */}
                 <div className="absolute inset-0 bg-accent-primary/5 opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none"></div>
-
                 <div
                     ref={terminalRef}
                     className="absolute inset-0 p-4 overflow-hidden"

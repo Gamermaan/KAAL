@@ -3,3 +3,4 @@ pyyaml==6.0
 aiohttp==3.9.1
 python-dotenv==1.0.0
 pydantic==2.5.0
+websockets>=12.0

